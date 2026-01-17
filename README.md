@@ -25,7 +25,39 @@ Gribe is an open-source speech-to-text API compatible with OpenAI's Realtime API
    ```bash
    go mod download
    ```
-3. Place your models in the `models/` directory or update `config.yaml` to point to your models.
+3. Setup ASR models (see [Model Setup](#model-setup) below).
+
+## Model Setup
+
+Gribe requires pre-trained ONNX models to perform speech-to-text. By default, it looks for models in the `models/` directory.
+
+### 1. Download Models
+Download the streaming Zipformer models from Hugging Face:
+
+- **Indonesian (ID)**: [sherpa-onnx-streaming-zipformer2-id](https://huggingface.co/spacewave/sherpa-onnx-streaming-zipformer2-id)
+- **English (EN)**: [sherpa-onnx-streaming-zipformer-en-2023-06-26](https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26)
+
+### 2. Directory Structure
+Place the downloaded folders under the `models/` directory. Your structure should look like this:
+
+```text
+gribe/
+├── models/
+│   ├── sherpa-onnx-streaming-zipformer2-id/
+│   │   ├── encoder-iter-100000-avg-15-chunk-32-left-256.onnx
+│   │   ├── decoder-iter-100000-avg-15-chunk-32-left-256.onnx
+│   │   ├── joiner-iter-100000-avg-15-chunk-32-left-256.onnx
+│   │   └── tokens.txt
+│   └── sherpa-onnx-streaming-zipformer-en-2023-06-26/
+│       ├── encoder-epoch-99-avg-1-chunk-16-left-128.onnx
+│       ├── decoder-epoch-99-avg-1-chunk-16-left-128.onnx
+│       ├── joiner-epoch-99-avg-1-chunk-16-left-128.onnx
+│       └── tokens.txt
+└── config.yaml
+```
+
+### 3. Verify `config.yaml`
+Ensure the file names in `config.yaml` match the files you downloaded.
 
 ### Running the Server
 ```bash
