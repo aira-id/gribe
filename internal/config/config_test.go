@@ -17,7 +17,6 @@ auth:
   api_keys:
     - "test-key-1"
 audio:
-  provider: "mock"
   max_audio_buffer_size: 1000000
   transcription_timeout: "15s"
 rate:
@@ -57,10 +56,6 @@ asr:
 
 	if len(cfg.Auth.APIKeys) != 1 || cfg.Auth.APIKeys[0] != "test-key-1" {
 		t.Errorf("Expected APIKeys [test-key-1], got %v", cfg.Auth.APIKeys)
-	}
-
-	if cfg.Audio.Provider != "mock" {
-		t.Errorf("Expected Audio Provider mock, got %s", cfg.Audio.Provider)
 	}
 
 	if cfg.Audio.MaxBufferSize != 1000000 {

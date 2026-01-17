@@ -32,7 +32,6 @@ type AuthConfig struct {
 
 // AudioConfig holds audio processing limits
 type AudioConfig struct {
-	Provider             string        `yaml:"provider"`              // ASR Provider type (e.g., "sherpa-onnx", "mock")
 	MaxBufferSize        int           `yaml:"max_audio_buffer_size"` // Maximum audio buffer size in bytes (default 15MB)
 	TranscriptionTimeout time.Duration `yaml:"transcription_timeout"` // Timeout for transcription calls (default 30s)
 }
@@ -56,6 +55,7 @@ type ASRConfig struct {
 
 // ModelConfig holds configuration for a specific ASR model
 type ModelConfig struct {
+	Provider  string   `yaml:"provider"`  // Provider type (e.g., "sherpa-onnx", "whisper-cpp")
 	Encoder   string   `yaml:"encoder"`   // Path to encoder model file
 	Decoder   string   `yaml:"decoder"`   // Path to decoder model file
 	Joiner    string   `yaml:"joiner"`    // Path to joiner model file
@@ -83,7 +83,6 @@ func Load() *Config {
 			APIKeys: getEnvSlice("GRIBE_API_KEYS", nil), // nil = no auth required
 		},
 		Audio: AudioConfig{
-			Provider:             getEnv("GRIBE_ASR_PROVIDER", "sherpa-onnx"),
 			MaxBufferSize:        getEnvInt("GRIBE_MAX_AUDIO_BUFFER_SIZE", 15*1024*1024), // 15MB default
 			TranscriptionTimeout: time.Duration(getEnvInt("GRIBE_TRANSCRIPTION_TIMEOUT_SECONDS", 30)) * time.Second,
 		},
@@ -221,9 +220,6 @@ func LoadWithYAML(yamlPath string) *Config {
 		cfg.Auth.APIKeys = yamlCfg.Auth.APIKeys
 	}
 
-	if yamlCfg.Audio.Provider != "" {
-		cfg.Audio.Provider = yamlCfg.Audio.Provider
-	}
 	if yamlCfg.Audio.MaxBufferSize > 0 {
 		cfg.Audio.MaxBufferSize = yamlCfg.Audio.MaxBufferSize
 	}

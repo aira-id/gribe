@@ -27,7 +27,7 @@ type SessionUsecase struct {
 	sessionManager       *SessionManager
 	idGen                *IDGenerator
 	asrProvider          domain.ASRProvider
-	asrConfig            *config.Config // Store config for reconfiguration
+	asrConfig            *config.Config                // Store config for reconfiguration
 	vadProviders         map[string]*SimpleVADProvider // sessionID -> VAD
 	vadMu                sync.RWMutex
 	maxAudioBufferSize   int
@@ -78,19 +78,24 @@ func NewSessionUsecaseWithConfig(cfg *config.Config) *SessionUsecase {
 	}
 
 	// Use factory to create ASR provider
+	providerType := "sherpa-onnx" // Hardcoded fallback
+	if modelConfig != nil && modelConfig.Provider != "" {
+		providerType = modelConfig.Provider
+	}
+
 	asrConfig := &ASRProviderConfig{
-		Type:                   ASRProviderType(cfg.Audio.Provider),
+		Type:                   ASRProviderType(providerType),
 		ProviderSpecificConfig: providerConfig,
 	}
 
 	factory := NewASRProviderFactory()
 	asrProvider, err := factory.Create(asrConfig)
 	if err != nil {
-		log.Printf("[CRITICAL] Failed to create ASR provider '%s': %v", cfg.Audio.Provider, err)
+		log.Printf("[CRITICAL] Failed to create ASR provider '%s': %v", providerType, err)
 		log.Printf("[INFO] Falling back to mock provider for session handling")
 		asrProvider = mock.New()
 	} else {
-		log.Printf("[INFO] Successfully initialized ASR provider: %s", cfg.Audio.Provider)
+		log.Printf("[INFO] Successfully initialized ASR provider: %s", providerType)
 	}
 
 	return &SessionUsecase{
@@ -379,8 +384,13 @@ func (u *SessionUsecase) reconfigureASRProvider(conn Conn, eventID, modelName, l
 	providerConfig["language"] = language
 
 	// Create new ASR provider
+	providerType := "sherpa-onnx" // Hardcoded fallback
+	if modelConfig.Provider != "" {
+		providerType = modelConfig.Provider
+	}
+
 	asrConfig := &ASRProviderConfig{
-		Type:                   ASRProviderType(u.asrConfig.Audio.Provider),
+		Type:                   ASRProviderType(providerType),
 		ProviderSpecificConfig: providerConfig,
 	}
 
