@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/aira-id/gribe/internal/config"
 	"github.com/aira-id/gribe/internal/delivery/websocket"
@@ -13,8 +15,8 @@ import (
 )
 
 func main() {
-	// Load configuration from environment
-	cfg := config.Load()
+	// Load configuration from environment and YAML
+	cfg := config.LoadWithYAML("config.yaml")
 
 	// Log configuration (without sensitive data)
 	log.Printf("Starting Gribe STT Server")
@@ -49,25 +51,37 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	// Start server in a goroutine
+	addr := ":" + cfg.Server.Port
+	server := &http.Server{
+		Addr:    addr,
+		Handler: nil, // Uses http.DefaultServeMux
+	}
+
 	// Graceful shutdown handling
-	done := make(chan bool, 1)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		<-quit
-		log.Println("Server shutting down...")
-		wsHandler.Close()
-		done <- true
+		log.Printf("Server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
 	}()
 
-	// Start server
-	addr := ":" + cfg.Server.Port
-	log.Printf("Server listening on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal("Server error:", err)
+	// Wait for shutdown signal
+	sig := <-quit
+	log.Printf("Received signal: %v, shutting down...", sig)
+
+	// Context for shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown server and cleanup resources
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Server force shutdown: %v", err)
 	}
 
-	<-done
+	wsHandler.Close()
 	log.Println("Server stopped")
 }
