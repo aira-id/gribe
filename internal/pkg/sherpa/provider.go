@@ -4,35 +4,83 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sync"
 
 	"github.com/aira-id/gribe/internal/domain"
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 )
 
+// Config holds sherpa-onnx specific configuration
+type Config struct {
+	Provider   string   // cpu or gpu
+	NumThreads int      // Number of threads for inference
+	ModelsDir  string   // Base directory for models
+	ModelName  string   // Model directory name
+	Encoder    string   // Encoder file name
+	Decoder    string   // Decoder file name
+	Joiner     string   // Joiner file name
+	Tokens     string   // Tokens file name
+	Languages  []string // Supported languages
+	Language   string   // Current language for transcription
+}
+
 // Provider implements the ASRProvider interface using sherpa-onnx
 type Provider struct {
-	config          *domain.TranscriptionConfig
-	recognizer      *sherpa.OnlineRecognizer
-	mu              sync.Mutex
-	isInitialized   bool
-	supportedModels []string
-	supportedLangs  []string
+	config        *Config
+	recognizer    *sherpa.OnlineRecognizer
+	mu            sync.Mutex
+	isInitialized bool
 }
 
 // New creates a new sherpa-onnx ASR provider
-func New(config *domain.TranscriptionConfig) (*Provider, error) {
+func New(config *Config) (*Provider, error) {
 	if config == nil {
-		config = &domain.TranscriptionConfig{
-			Model:    "zipformer",
-			Language: "id",
-		}
+		return nil, fmt.Errorf("sherpa config is required")
+	}
+
+	// Validate required fields
+	if config.ModelName == "" {
+		return nil, fmt.Errorf("model_name is required in sherpa config")
+	}
+	if config.Encoder == "" {
+		return nil, fmt.Errorf("encoder is required in sherpa config")
+	}
+	if config.Decoder == "" {
+		return nil, fmt.Errorf("decoder is required in sherpa config")
+	}
+	if config.Joiner == "" {
+		return nil, fmt.Errorf("joiner is required in sherpa config")
+	}
+	if config.Tokens == "" {
+		return nil, fmt.Errorf("tokens is required in sherpa config")
+	}
+	if len(config.Languages) == 0 {
+		return nil, fmt.Errorf("languages is required in sherpa config")
+	}
+	if config.Language == "" {
+		return nil, fmt.Errorf("language is required in sherpa config")
+	}
+
+	// Validate language is supported
+	if !config.IsLanguageSupported(config.Language) {
+		return nil, fmt.Errorf("language '%s' is not supported by model '%s', supported languages: %v",
+			config.Language, config.ModelName, config.Languages)
+	}
+
+	// Set defaults for optional fields
+	if config.Provider == "" {
+		config.Provider = "cpu"
+	}
+	if config.NumThreads == 0 {
+		config.NumThreads = 4
+	}
+	if config.ModelsDir == "" {
+		config.ModelsDir = "./models"
 	}
 
 	provider := &Provider{
-		config:          config,
-		supportedModels: []string{"zipformer", "paraformer", "transducer"},
-		supportedLangs:  []string{"id", "en", "zh", "de", "es", "fr", "ja", "ko", "ru"},
+		config: config,
 	}
 
 	// Initialize the recognizer
@@ -43,30 +91,46 @@ func New(config *domain.TranscriptionConfig) (*Provider, error) {
 	return provider, nil
 }
 
+// IsLanguageSupported checks if the given language is supported by this config
+func (c *Config) IsLanguageSupported(lang string) bool {
+	for _, l := range c.Languages {
+		if l == lang {
+			return true
+		}
+	}
+	return false
+}
+
 // initializeRecognizer initializes the sherpa-onnx recognizer
 func (p *Provider) initializeRecognizer() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	log.Printf("Initializing sherpa-onnx recognizer with model: %s (language: %s)",
-		p.config.Model, p.config.Language)
+		p.config.ModelName, p.config.Language)
 
 	recognizerConfig := &sherpa.OnlineRecognizerConfig{}
 	recognizerConfig.FeatConfig.SampleRate = 16000
 	recognizerConfig.FeatConfig.FeatureDim = 80
 
-	// Use the provided Indonesian model files (Transducer model)
-	modelDir := "models/sherpa-onnx-streaming-zipformer2-id"
-	recognizerConfig.ModelConfig.Transducer.Encoder = modelDir + "/encoder-iter-100000-avg-15-chunk-32-left-256.onnx"
-	recognizerConfig.ModelConfig.Transducer.Decoder = modelDir + "/decoder-iter-100000-avg-15-chunk-32-left-256.onnx"
-	recognizerConfig.ModelConfig.Transducer.Joiner = modelDir + "/joiner-iter-100000-avg-15-chunk-32-left-256.onnx"
-	recognizerConfig.ModelConfig.Tokens = modelDir + "/tokens.txt"
+	// Build model paths from config
+	modelDir := filepath.Join(p.config.ModelsDir, p.config.ModelName)
+	recognizerConfig.ModelConfig.Transducer.Encoder = filepath.Join(modelDir, p.config.Encoder)
+	recognizerConfig.ModelConfig.Transducer.Decoder = filepath.Join(modelDir, p.config.Decoder)
+	recognizerConfig.ModelConfig.Transducer.Joiner = filepath.Join(modelDir, p.config.Joiner)
+	recognizerConfig.ModelConfig.Tokens = filepath.Join(modelDir, p.config.Tokens)
 
-	recognizerConfig.ModelConfig.NumThreads = 4
-	recognizerConfig.ModelConfig.Provider = "cpu"
+	recognizerConfig.ModelConfig.NumThreads = p.config.NumThreads
+	recognizerConfig.ModelConfig.Provider = p.config.Provider
 	recognizerConfig.ModelConfig.Debug = 0
 	recognizerConfig.DecodingMethod = "greedy_search"
 	recognizerConfig.MaxActivePaths = 4
+
+	log.Printf("Model paths: encoder=%s, decoder=%s, joiner=%s, tokens=%s",
+		recognizerConfig.ModelConfig.Transducer.Encoder,
+		recognizerConfig.ModelConfig.Transducer.Decoder,
+		recognizerConfig.ModelConfig.Transducer.Joiner,
+		recognizerConfig.ModelConfig.Tokens)
 
 	p.recognizer = sherpa.NewOnlineRecognizer(recognizerConfig)
 	if p.recognizer == nil {
@@ -76,7 +140,7 @@ func (p *Provider) initializeRecognizer() error {
 	}
 
 	p.isInitialized = true
-	log.Printf("Sherpa-onnx recognizer initialized successfully with Indonesian zipformer2 model")
+	log.Printf("Sherpa-onnx recognizer initialized successfully with model: %s", p.config.ModelName)
 
 	return nil
 }
@@ -266,12 +330,12 @@ func (p *Provider) TranscribeStream(ctx context.Context, config *domain.Transcri
 
 // GetSupportedModels returns list of supported ASR models
 func (p *Provider) GetSupportedModels() []string {
-	return p.supportedModels
+	return []string{p.config.ModelName}
 }
 
 // GetSupportedLanguages returns list of supported language codes
 func (p *Provider) GetSupportedLanguages() []string {
-	return p.supportedLangs
+	return p.config.Languages
 }
 
 // Close releases any resources held by the provider

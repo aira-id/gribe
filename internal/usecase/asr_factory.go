@@ -9,6 +9,9 @@ import (
 	"github.com/aira-id/gribe/internal/pkg/whisper"
 )
 
+// Ensure domain is used (for ASRProvider interface)
+var _ domain.ASRProvider = (*sherpa.Provider)(nil)
+
 // ASRProviderType represents the type of ASR provider
 type ASRProviderType string
 
@@ -90,15 +93,45 @@ func (f *ASRProviderFactory) GetSupportedProviders() []ASRProviderType {
 
 // createSherpaOnnxProvider creates a sherpa-onnx ASR provider
 func createSherpaOnnxProvider(config *ASRProviderConfig) (domain.ASRProvider, error) {
-	transcConfig := config.TranscriptionConfig
-	if transcConfig == nil {
-		transcConfig = &domain.TranscriptionConfig{
-			Model:    "zipformer",
-			Language: "en",
-		}
+	if config.ProviderSpecificConfig == nil {
+		return nil, fmt.Errorf("sherpa-onnx provider requires ProviderSpecificConfig")
 	}
 
-	return sherpa.New(transcConfig)
+	// Extract sherpa config from ProviderSpecificConfig
+	sherpaConfig := &sherpa.Config{}
+
+	if v, ok := config.ProviderSpecificConfig["provider"].(string); ok {
+		sherpaConfig.Provider = v
+	}
+	if v, ok := config.ProviderSpecificConfig["num_threads"].(int); ok {
+		sherpaConfig.NumThreads = v
+	}
+	if v, ok := config.ProviderSpecificConfig["models_dir"].(string); ok {
+		sherpaConfig.ModelsDir = v
+	}
+	if v, ok := config.ProviderSpecificConfig["model_name"].(string); ok {
+		sherpaConfig.ModelName = v
+	}
+	if v, ok := config.ProviderSpecificConfig["encoder"].(string); ok {
+		sherpaConfig.Encoder = v
+	}
+	if v, ok := config.ProviderSpecificConfig["decoder"].(string); ok {
+		sherpaConfig.Decoder = v
+	}
+	if v, ok := config.ProviderSpecificConfig["joiner"].(string); ok {
+		sherpaConfig.Joiner = v
+	}
+	if v, ok := config.ProviderSpecificConfig["tokens"].(string); ok {
+		sherpaConfig.Tokens = v
+	}
+	if v, ok := config.ProviderSpecificConfig["languages"].([]string); ok {
+		sherpaConfig.Languages = v
+	}
+	if v, ok := config.ProviderSpecificConfig["language"].(string); ok {
+		sherpaConfig.Language = v
+	}
+
+	return sherpa.New(sherpaConfig)
 }
 
 // createWhisperCppProvider creates a whisper.cpp ASR provider

@@ -27,6 +27,7 @@ type SessionUsecase struct {
 	sessionManager       *SessionManager
 	idGen                *IDGenerator
 	asrProvider          domain.ASRProvider
+	asrConfig            *config.Config // Store config for reconfiguration
 	vadProviders         map[string]*SimpleVADProvider // sessionID -> VAD
 	vadMu                sync.RWMutex
 	maxAudioBufferSize   int
@@ -47,13 +48,39 @@ func NewSessionUsecase() *SessionUsecase {
 
 // NewSessionUsecaseWithConfig creates a session usecase with configuration
 func NewSessionUsecaseWithConfig(cfg *config.Config) *SessionUsecase {
+	// Build provider-specific config from ASR YAML config
+	providerConfig := make(map[string]interface{})
+
+	// Get the default model config
+	var modelConfig *config.ModelConfig
+	if cfg.ASR.DefaultModel != "" {
+		if mc, ok := cfg.ASR.Models[cfg.ASR.DefaultModel]; ok {
+			modelConfig = &mc
+		}
+	}
+
+	// Populate provider config from YAML
+	providerConfig["provider"] = cfg.ASR.Provider
+	providerConfig["num_threads"] = cfg.ASR.NumThreads
+	providerConfig["models_dir"] = cfg.ASR.ModelsDir
+	providerConfig["model_name"] = cfg.ASR.DefaultModel
+
+	if modelConfig != nil {
+		providerConfig["encoder"] = modelConfig.Encoder
+		providerConfig["decoder"] = modelConfig.Decoder
+		providerConfig["joiner"] = modelConfig.Joiner
+		providerConfig["tokens"] = modelConfig.Tokens
+		providerConfig["languages"] = modelConfig.Languages
+		// Use first language as default if available
+		if len(modelConfig.Languages) > 0 {
+			providerConfig["language"] = modelConfig.Languages[0]
+		}
+	}
+
 	// Use factory to create ASR provider
 	asrConfig := &ASRProviderConfig{
-		Type: ASRProviderType(cfg.Audio.Provider),
-		TranscriptionConfig: &domain.TranscriptionConfig{
-			Model:    "zipformer",
-			Language: "id",
-		},
+		Type:                   ASRProviderType(cfg.Audio.Provider),
+		ProviderSpecificConfig: providerConfig,
 	}
 
 	factory := NewASRProviderFactory()
@@ -70,6 +97,7 @@ func NewSessionUsecaseWithConfig(cfg *config.Config) *SessionUsecase {
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
 		asrProvider:          asrProvider,
+		asrConfig:            cfg,
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   cfg.Audio.MaxBufferSize,
 		transcriptionTimeout: cfg.Audio.TranscriptionTimeout,
@@ -257,6 +285,15 @@ func (u *SessionUsecase) handleSessionUpdate(conn Conn, state *domain.SessionSta
 		return
 	}
 
+	// Check if transcription config is being updated (model/language change)
+	if event.Session.Audio != nil && event.Session.Audio.Input != nil && event.Session.Audio.Input.Transcription != nil {
+		transcription := event.Session.Audio.Input.Transcription
+		if err := u.reconfigureASRProvider(conn, event.EventID, transcription.Model, transcription.Language); err != nil {
+			// Error already sent to client
+			return
+		}
+	}
+
 	// Update session configuration
 	updatedState, err := u.sessionManager.UpdateSession(state.ID, event.Session)
 	if err != nil {
@@ -274,6 +311,97 @@ func (u *SessionUsecase) handleSessionUpdate(conn Conn, state *domain.SessionSta
 	}
 
 	conn.WriteJSON(sessionUpdatedEvent)
+}
+
+// reconfigureASRProvider reconfigures the ASR provider with a new model and language
+func (u *SessionUsecase) reconfigureASRProvider(conn Conn, eventID, modelName, language string) error {
+	// Check if config is available
+	if u.asrConfig == nil {
+		u.sendError(conn, eventID, "server_error", "configuration_unavailable",
+			"ASR configuration not available. Server was not initialized with YAML config.", nil)
+		return fmt.Errorf("ASR configuration not available")
+	}
+
+	// Validate model_name is provided
+	if modelName == "" {
+		u.sendError(conn, eventID, "invalid_request_error", "missing_field",
+			"transcription.model is required", "audio.input.transcription.model")
+		return fmt.Errorf("model is required")
+	}
+
+	// Validate language is provided
+	if language == "" {
+		u.sendError(conn, eventID, "invalid_request_error", "missing_field",
+			"transcription.language is required", "audio.input.transcription.language")
+		return fmt.Errorf("language is required")
+	}
+
+	// Check if model exists in config
+	modelConfig, exists := u.asrConfig.ASR.Models[modelName]
+	if !exists {
+		availableModels := make([]string, 0, len(u.asrConfig.ASR.Models))
+		for name := range u.asrConfig.ASR.Models {
+			availableModels = append(availableModels, name)
+		}
+		u.sendError(conn, eventID, "invalid_request_error", "invalid_model",
+			fmt.Sprintf("Model '%s' not found. Available models: %v", modelName, availableModels),
+			"audio.input.transcription.model")
+		return fmt.Errorf("model not found: %s", modelName)
+	}
+
+	// Validate language is supported by the model
+	languageSupported := false
+	for _, lang := range modelConfig.Languages {
+		if lang == language {
+			languageSupported = true
+			break
+		}
+	}
+	if !languageSupported {
+		u.sendError(conn, eventID, "invalid_request_error", "unsupported_language",
+			fmt.Sprintf("Language '%s' is not supported by model '%s'. Supported languages: %v",
+				language, modelName, modelConfig.Languages),
+			"audio.input.transcription.language")
+		return fmt.Errorf("unsupported language: %s", language)
+	}
+
+	// Build provider config for the new model/language
+	providerConfig := make(map[string]interface{})
+	providerConfig["provider"] = u.asrConfig.ASR.Provider
+	providerConfig["num_threads"] = u.asrConfig.ASR.NumThreads
+	providerConfig["models_dir"] = u.asrConfig.ASR.ModelsDir
+	providerConfig["model_name"] = modelName
+	providerConfig["encoder"] = modelConfig.Encoder
+	providerConfig["decoder"] = modelConfig.Decoder
+	providerConfig["joiner"] = modelConfig.Joiner
+	providerConfig["tokens"] = modelConfig.Tokens
+	providerConfig["languages"] = modelConfig.Languages
+	providerConfig["language"] = language
+
+	// Create new ASR provider
+	asrConfig := &ASRProviderConfig{
+		Type:                   ASRProviderType(u.asrConfig.Audio.Provider),
+		ProviderSpecificConfig: providerConfig,
+	}
+
+	factory := NewASRProviderFactory()
+	newProvider, err := factory.Create(asrConfig)
+	if err != nil {
+		u.sendError(conn, eventID, "server_error", "provider_initialization_failed",
+			fmt.Sprintf("Failed to initialize ASR provider: %v", err), nil)
+		return fmt.Errorf("failed to initialize ASR provider: %w", err)
+	}
+
+	// Close old provider if it has a Close method
+	if closer, ok := u.asrProvider.(interface{ Close() error }); ok {
+		closer.Close()
+	}
+
+	// Update the ASR provider
+	u.asrProvider = newProvider
+
+	log.Printf("[INFO] ASR provider reconfigured with model: %s, language: %s", modelName, language)
+	return nil
 }
 
 // ============================================================================
