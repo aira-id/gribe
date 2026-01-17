@@ -12,6 +12,7 @@ import (
 
 	"github.com/aira-id/gribe/internal/config"
 	"github.com/aira-id/gribe/internal/domain"
+	"github.com/aira-id/gribe/internal/pkg/mock"
 )
 
 // Conn defines the interface for WebSocket connections
@@ -37,7 +38,7 @@ func NewSessionUsecase() *SessionUsecase {
 	return &SessionUsecase{
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
-		asrProvider:          NewMockASRProvider(),
+		asrProvider:          mock.New(),
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   15 * 1024 * 1024, // 15MB default
 		transcriptionTimeout: 30 * time.Second,
@@ -49,7 +50,7 @@ func NewSessionUsecaseWithConfig(cfg *config.Config) *SessionUsecase {
 	return &SessionUsecase{
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
-		asrProvider:          NewMockASRProvider(),
+		asrProvider:          mock.New(),
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   cfg.Audio.MaxBufferSize,
 		transcriptionTimeout: cfg.Audio.TranscriptionTimeout,
@@ -66,6 +67,34 @@ func NewSessionUsecaseWithASR(asr domain.ASRProvider) *SessionUsecase {
 		maxAudioBufferSize:   15 * 1024 * 1024, // 15MB default
 		transcriptionTimeout: 30 * time.Second,
 	}
+}
+
+// NewSessionUsecaseWithSherpaOnnx creates a session usecase with sherpa-onnx ASR provider
+func NewSessionUsecaseWithSherpaOnnx(config *domain.TranscriptionConfig) (*SessionUsecase, error) {
+	asrConfig := &ASRProviderConfig{
+		Type:                   ProviderSherpaOnnx,
+		TranscriptionConfig:    config,
+		ProviderSpecificConfig: make(map[string]interface{}),
+	}
+	return NewSessionUsecaseWithASRProvider(asrConfig)
+}
+
+// NewSessionUsecaseWithASRProvider creates a session usecase with an ASR provider from factory
+func NewSessionUsecaseWithASRProvider(asrConfig *ASRProviderConfig) (*SessionUsecase, error) {
+	factory := NewASRProviderFactory()
+	asrProvider, err := factory.Create(asrConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ASR provider: %w", err)
+	}
+
+	return &SessionUsecase{
+		sessionManager:       NewSessionManager(),
+		idGen:                NewIDGenerator(),
+		asrProvider:          asrProvider,
+		vadProviders:         make(map[string]*SimpleVADProvider),
+		maxAudioBufferSize:   15 * 1024 * 1024, // 15MB default
+		transcriptionTimeout: 30 * time.Second,
+	}, nil
 }
 
 // getOrCreateVAD gets or creates a VAD provider for a session
