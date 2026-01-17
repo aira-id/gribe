@@ -47,10 +47,29 @@ func NewSessionUsecase() *SessionUsecase {
 
 // NewSessionUsecaseWithConfig creates a session usecase with configuration
 func NewSessionUsecaseWithConfig(cfg *config.Config) *SessionUsecase {
+	// Use factory to create ASR provider
+	asrConfig := &ASRProviderConfig{
+		Type: ASRProviderType(cfg.Audio.Provider),
+		TranscriptionConfig: &domain.TranscriptionConfig{
+			Model:    "zipformer",
+			Language: "id",
+		},
+	}
+
+	factory := NewASRProviderFactory()
+	asrProvider, err := factory.Create(asrConfig)
+	if err != nil {
+		log.Printf("[CRITICAL] Failed to create ASR provider '%s': %v", cfg.Audio.Provider, err)
+		log.Printf("[INFO] Falling back to mock provider for session handling")
+		asrProvider = mock.New()
+	} else {
+		log.Printf("[INFO] Successfully initialized ASR provider: %s", cfg.Audio.Provider)
+	}
+
 	return &SessionUsecase{
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
-		asrProvider:          mock.New(),
+		asrProvider:          asrProvider,
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   cfg.Audio.MaxBufferSize,
 		transcriptionTimeout: cfg.Audio.TranscriptionTimeout,

@@ -28,6 +28,7 @@ type AuthConfig struct {
 
 // AudioConfig holds audio processing limits
 type AudioConfig struct {
+	Provider             string        // ASR Provider type (e.g., "sherpa-onnx", "mock")
 	MaxBufferSize        int           // Maximum audio buffer size in bytes (default 15MB)
 	TranscriptionTimeout time.Duration // Timeout for transcription calls (default 30s)
 }
@@ -51,6 +52,7 @@ func Load() *Config {
 			APIKeys: getEnvSlice("GRIBE_API_KEYS", nil), // nil = no auth required
 		},
 		Audio: AudioConfig{
+			Provider:             getEnv("GRIBE_ASR_PROVIDER", "sherpa-onnx"),
 			MaxBufferSize:        getEnvInt("GRIBE_MAX_AUDIO_BUFFER_SIZE", 15*1024*1024), // 15MB default
 			TranscriptionTimeout: time.Duration(getEnvInt("GRIBE_TRANSCRIPTION_TIMEOUT_SECONDS", 30)) * time.Second,
 		},

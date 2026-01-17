@@ -7,31 +7,13 @@ import (
 	"sync"
 
 	"github.com/aira-id/gribe/internal/domain"
+	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 )
-
-// OnlineRecognizer is a wrapper for sherpa-onnx OnlineRecognizer
-// This would be the actual sherpa-onnx type when the library is available
-type OnlineRecognizer interface {
-	IsReady(stream interface{}) bool
-	Decode(stream interface{})
-	GetResult(stream interface{}) *Result
-}
-
-// OnlineStream is a wrapper for sherpa-onnx OnlineStream
-type OnlineStream interface {
-	AcceptWaveform(sampleRate int, samples []float32)
-}
-
-// Result represents the result from sherpa-onnx
-type Result struct {
-	Text string
-}
 
 // Provider implements the ASRProvider interface using sherpa-onnx
 type Provider struct {
 	config          *domain.TranscriptionConfig
-	recognizer      OnlineRecognizer
-	stream          OnlineStream
+	recognizer      *sherpa.OnlineRecognizer
 	mu              sync.Mutex
 	isInitialized   bool
 	supportedModels []string
@@ -43,14 +25,14 @@ func New(config *domain.TranscriptionConfig) (*Provider, error) {
 	if config == nil {
 		config = &domain.TranscriptionConfig{
 			Model:    "zipformer",
-			Language: "en",
+			Language: "id",
 		}
 	}
 
 	provider := &Provider{
 		config:          config,
 		supportedModels: []string{"zipformer", "paraformer", "transducer"},
-		supportedLangs:  []string{"en", "zh", "de", "es", "fr", "ja", "ko", "ru"},
+		supportedLangs:  []string{"id", "en", "zh", "de", "es", "fr", "ja", "ko", "ru"},
 	}
 
 	// Initialize the recognizer
@@ -61,7 +43,7 @@ func New(config *domain.TranscriptionConfig) (*Provider, error) {
 	return provider, nil
 }
 
-// initializeRecognizer initializes the sherpa-onnx recognizer with OnlineRecognizer
+// initializeRecognizer initializes the sherpa-onnx recognizer
 func (p *Provider) initializeRecognizer() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -69,36 +51,32 @@ func (p *Provider) initializeRecognizer() error {
 	log.Printf("Initializing sherpa-onnx recognizer with model: %s (language: %s)",
 		p.config.Model, p.config.Language)
 
-	// TODO: Uncomment and use when sherpa-onnx Go bindings are available
-	// This is a placeholder for the actual initialization code
-	/*
-		recognizerConfig := &sherpa.OnlineRecognizerConfig{}
-		recognizerConfig.FeatConfig = sherpa.FeatureConfig{
-			SampleRate: 16000,
-			FeatureDim: 80,
-		}
+	recognizerConfig := &sherpa.OnlineRecognizerConfig{}
+	recognizerConfig.FeatConfig.SampleRate = 16000
+	recognizerConfig.FeatConfig.FeatureDim = 80
 
-		recognizerConfig.ModelConfig.Zipformer2Ctc.Model = p.config.Model
-		recognizerConfig.ModelConfig.NumThreads = 4
-		recognizerConfig.ModelConfig.Provider = "cpu"
-		recognizerConfig.ModelConfig.Debug = 0
-		recognizerConfig.DecodingMethod = "greedy_search"
-		recognizerConfig.MaxActivePaths = 4
+	// Use the provided Indonesian model files (Transducer model)
+	modelDir := "models/sherpa-onnx-streaming-zipformer2-id"
+	recognizerConfig.ModelConfig.Transducer.Encoder = modelDir + "/encoder-iter-100000-avg-15-chunk-32-left-256.onnx"
+	recognizerConfig.ModelConfig.Transducer.Decoder = modelDir + "/decoder-iter-100000-avg-15-chunk-32-left-256.onnx"
+	recognizerConfig.ModelConfig.Transducer.Joiner = modelDir + "/joiner-iter-100000-avg-15-chunk-32-left-256.onnx"
+	recognizerConfig.ModelConfig.Tokens = modelDir + "/tokens.txt"
 
-		var err error
-		p.recognizer, err = sherpa.NewOnlineRecognizer(recognizerConfig)
-		if err != nil {
-			return fmt.Errorf("failed to create OnlineRecognizer: %w", err)
-		}
+	recognizerConfig.ModelConfig.NumThreads = 4
+	recognizerConfig.ModelConfig.Provider = "cpu"
+	recognizerConfig.ModelConfig.Debug = 0
+	recognizerConfig.DecodingMethod = "greedy_search"
+	recognizerConfig.MaxActivePaths = 4
 
-		p.stream, err = sherpa.NewOnlineStream(p.recognizer)
-		if err != nil {
-			return fmt.Errorf("failed to create OnlineStream: %w", err)
-		}
-	*/
+	p.recognizer = sherpa.NewOnlineRecognizer(recognizerConfig)
+	if p.recognizer == nil {
+		err := fmt.Errorf("sherpa.NewOnlineRecognizer returned nil - check model paths and library compatibility")
+		log.Printf("[ERROR] %v", err)
+		return err
+	}
 
 	p.isInitialized = true
-	log.Printf("Sherpa-onnx recognizer initialized successfully (mock mode)")
+	log.Printf("Sherpa-onnx recognizer initialized successfully with Indonesian zipformer2 model")
 
 	return nil
 }
@@ -123,51 +101,45 @@ func (p *Provider) Transcribe(ctx context.Context, audio []byte, config *domain.
 		p.mu.Lock()
 		defer p.mu.Unlock()
 
-		// Convert bytes to float32 samples (assuming PCM 16-bit)
+		stream := sherpa.NewOnlineStream(p.recognizer)
+		if stream == nil {
+			log.Printf("Error: failed to create OnlineStream")
+			return
+		}
+		defer sherpa.DeleteOnlineStream(stream)
+
+		// Convert bytes to float32 samples
 		samples := bytesToFloat32(audio)
 
-		// TODO: Uncomment when sherpa-onnx library is available
-		/*
-			// Add left padding (0.3 seconds of silence)
-			leftPadding := make([]float32, int(float32(16000)*0.3))
-			p.stream.AcceptWaveform(16000, leftPadding)
+		// Add left padding (0.3 seconds of silence)
+		leftPadding := make([]float32, 4800) // 16000 * 0.3
+		stream.AcceptWaveform(16000, leftPadding)
 
-			// Process the audio
-			p.stream.AcceptWaveform(16000, samples)
+		// Process the audio
+		stream.AcceptWaveform(16000, samples)
 
-			// Add right padding (0.6 seconds of silence)
-			rightPadding := make([]float32, int(float32(16000)*0.6))
-			p.stream.AcceptWaveform(16000, rightPadding)
+		// Add right padding (0.6 seconds of silence)
+		rightPadding := make([]float32, 9600) // 16000 * 0.6
+		stream.AcceptWaveform(16000, rightPadding)
 
-			// Decode
-			for p.recognizer.IsReady(p.stream) {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					p.recognizer.Decode(p.stream)
-				}
+		// Input finished
+		stream.InputFinished()
+
+		// Decode
+		for p.recognizer.IsReady(stream) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				p.recognizer.Decode(stream)
 			}
+		}
 
-			// Get results
-			result := p.recognizer.GetResult(p.stream)
+		// Get final result
+		result := p.recognizer.GetResult(stream)
 
-			// Send partial result as a chunk
-			if result.Text != "" {
-				chunk := domain.TranscriptionChunk{
-					Text:    result.Text,
-					IsFinal: false,
-					StartMs: 0,
-					EndMs:   len(samples) * 1000 / 16000,
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case resultChan <- chunk:
-				}
-			}
-
-			// Send final result
+		// Send final result
+		if result != nil && result.Text != "" {
 			finalChunk := domain.TranscriptionChunk{
 				Text:    result.Text,
 				IsFinal: true,
@@ -179,23 +151,7 @@ func (p *Provider) Transcribe(ctx context.Context, audio []byte, config *domain.
 				return
 			case resultChan <- finalChunk:
 			}
-
 			log.Printf("Transcription completed: %s", result.Text)
-		*/
-
-		// For now, send a mock transcription result
-		log.Printf("Transcribing %d bytes of audio", len(audio))
-		mockText := "Sample transcription from sherpa-onnx"
-		chunk := domain.TranscriptionChunk{
-			Text:    mockText,
-			IsFinal: true,
-			StartMs: 0,
-			EndMs:   len(samples) * 1000 / 16000,
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case resultChan <- chunk:
 		}
 	}()
 
@@ -203,7 +159,6 @@ func (p *Provider) Transcribe(ctx context.Context, audio []byte, config *domain.
 }
 
 // TranscribeStream processes audio data in streaming mode
-// Audio chunks are sent to the input channel, results come from output channel
 func (p *Provider) TranscribeStream(ctx context.Context, config *domain.TranscriptionConfig) (chan<- []byte, <-chan domain.TranscriptionChunk, error) {
 	audioIn := make(chan []byte, 100)
 	resultOut := make(chan domain.TranscriptionChunk, 10)
@@ -217,14 +172,15 @@ func (p *Provider) TranscribeStream(ctx context.Context, config *domain.Transcri
 	go func() {
 		defer close(resultOut)
 
-		// TODO: Uncomment when sherpa-onnx library is available
-		/*
-			p.mu.Lock()
-			// Add left padding at the start
-			leftPadding := make([]float32, int(float32(16000)*0.3))
-			p.stream.AcceptWaveform(16000, leftPadding)
-			p.mu.Unlock()
-		*/
+		p.mu.Lock()
+		stream := sherpa.NewOnlineStream(p.recognizer)
+		p.mu.Unlock()
+
+		if stream == nil {
+			log.Printf("Error: failed to create OnlineStream")
+			return
+		}
+		defer sherpa.DeleteOnlineStream(stream)
 
 		var lastPartialResult string
 
@@ -236,33 +192,20 @@ func (p *Provider) TranscribeStream(ctx context.Context, config *domain.Transcri
 			case audio, ok := <-audioIn:
 				if !ok {
 					// Channel closed, finalize
+					stream.InputFinished()
+
 					p.mu.Lock()
-
-					// TODO: Uncomment when sherpa-onnx library is available
-					/*
-						// Add right padding at the end
-						rightPadding := make([]float32, int(float32(16000)*0.6))
-						p.stream.AcceptWaveform(16000, rightPadding)
-
-						// Finalize decoding
-						for p.recognizer.IsReady(p.stream) {
-							p.recognizer.Decode(p.stream)
-						}
-
-						result := p.recognizer.GetResult(p.stream)
-					*/
-
-					// Mock result
-					result := &Result{
-						Text: "Transcription complete",
+					// Finalize decoding
+					for p.recognizer.IsReady(stream) {
+						p.recognizer.Decode(stream)
 					}
-
+					result := p.recognizer.GetResult(stream)
 					p.mu.Unlock()
 
 					// Send final result
-					if result.Text != lastPartialResult {
+					if result != nil && result.Text != "" && result.Text != lastPartialResult {
 						chunk := domain.TranscriptionChunk{
-							Text:    result.Text,
+							Text:    result.Text[len(lastPartialResult):],
 							IsFinal: true,
 						}
 						select {
@@ -270,41 +213,36 @@ func (p *Provider) TranscribeStream(ctx context.Context, config *domain.Transcri
 							return
 						case resultOut <- chunk:
 						}
-						lastPartialResult = result.Text
+					} else {
+						// Send empty final chunk if no new text
+						chunk := domain.TranscriptionChunk{
+							Text:    "",
+							IsFinal: true,
+						}
+						resultOut <- chunk
 					}
 
 					return
 				}
 
-				p.mu.Lock()
-
 				// Convert bytes to float32 samples
 				samples := bytesToFloat32(audio)
 
-				// TODO: Uncomment when sherpa-onnx library is available
-				/*
-					// Accept waveform
-					p.stream.AcceptWaveform(16000, samples)
+				p.mu.Lock()
+				// Accept waveform
+				stream.AcceptWaveform(16000, samples)
 
-					// Decode if ready
-					for p.recognizer.IsReady(p.stream) {
-						p.recognizer.Decode(p.stream)
-					}
-
-					// Get current result
-					result := p.recognizer.GetResult(p.stream)
-				*/
-
-				// Mock result based on audio data
-				mockTranscript := fmt.Sprintf("Received %d samples", len(samples))
-				result := &Result{
-					Text: mockTranscript,
+				// Decode if ready
+				for p.recognizer.IsReady(stream) {
+					p.recognizer.Decode(stream)
 				}
 
+				// Get current result
+				result := p.recognizer.GetResult(stream)
 				p.mu.Unlock()
 
 				// Send delta event if result changed
-				if result.Text != lastPartialResult {
+				if result != nil && result.Text != "" && result.Text != lastPartialResult {
 					delta := result.Text[len(lastPartialResult):]
 					if delta != "" {
 						chunk := domain.TranscriptionChunk{
@@ -316,8 +254,8 @@ func (p *Provider) TranscribeStream(ctx context.Context, config *domain.Transcri
 							return
 						case resultOut <- chunk:
 						}
+						lastPartialResult = result.Text
 					}
-					lastPartialResult = result.Text
 				}
 			}
 		}
@@ -341,18 +279,10 @@ func (p *Provider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// TODO: Uncomment when sherpa-onnx library is available
-	/*
-		if p.stream != nil {
-			sherpa.DeleteOnlineStream(p.stream)
-			p.stream = nil
-		}
-
-		if p.recognizer != nil {
-			sherpa.DeleteOnlineRecognizer(p.recognizer)
-			p.recognizer = nil
-		}
-	*/
+	if p.recognizer != nil {
+		sherpa.DeleteOnlineRecognizer(p.recognizer)
+		p.recognizer = nil
+	}
 
 	p.isInitialized = false
 	log.Printf("Sherpa-onnx provider closed")
