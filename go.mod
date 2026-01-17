@@ -10,4 +10,5 @@ require (
 require (
 	github.com/k2-fsa/sherpa-onnx-go v1.12.22 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-linux v1.12.22 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

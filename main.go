@@ -15,8 +15,8 @@ import (
 )
 
 func main() {
-	// Load configuration from environment
-	cfg := config.Load()
+	// Load configuration from environment and YAML
+	cfg := config.LoadWithYAML("config.yaml")
 
 	// Log configuration (without sensitive data)
 	log.Printf("Starting Gribe STT Server")

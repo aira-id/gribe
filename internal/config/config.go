@@ -1,10 +1,13 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds all configuration for the application
@@ -13,32 +16,60 @@ type Config struct {
 	Auth   AuthConfig
 	Audio  AudioConfig
 	Rate   RateLimitConfig
+	ASR    ASRConfig
 }
 
 // ServerConfig holds server-related configuration
 type ServerConfig struct {
-	Port           string
-	AllowedOrigins []string // Empty means allow all (wildcard)
+	Port           string   `yaml:"port"`
+	AllowedOrigins []string `yaml:"allowed_origins"` // Empty means allow all (wildcard)
 }
 
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
-	APIKeys []string // List of valid API keys, empty means no auth required
+	APIKeys []string `yaml:"api_keys"` // List of valid API keys, empty means no auth required
 }
 
 // AudioConfig holds audio processing limits
 type AudioConfig struct {
-	Provider             string        // ASR Provider type (e.g., "sherpa-onnx", "mock")
-	MaxBufferSize        int           // Maximum audio buffer size in bytes (default 15MB)
-	TranscriptionTimeout time.Duration // Timeout for transcription calls (default 30s)
+	Provider             string        `yaml:"provider"`              // ASR Provider type (e.g., "sherpa-onnx", "mock")
+	MaxBufferSize        int           `yaml:"max_audio_buffer_size"` // Maximum audio buffer size in bytes (default 15MB)
+	TranscriptionTimeout time.Duration `yaml:"transcription_timeout"` // Timeout for transcription calls (default 30s)
 }
 
 // RateLimitConfig holds rate limiting configuration
 type RateLimitConfig struct {
-	MaxConnectionsPerIP int           // Max concurrent connections per IP
-	RequestsPerSecond   int           // Max requests per second per connection
-	BurstSize           int           // Burst allowance for rate limiting
-	CleanupInterval     time.Duration // How often to clean up old entries
+	MaxConnectionsPerIP int           `yaml:"max_connections_per_ip"`
+	RequestsPerSecond   int           `yaml:"requests_per_second"`
+	BurstSize           int           `yaml:"burst_size"`
+	CleanupInterval     time.Duration `yaml:"cleanup_interval"`
+}
+
+// ASRConfig holds ASR provider configuration loaded from YAML
+type ASRConfig struct {
+	Provider     string                 `yaml:"provider"`      // cpu or gpu
+	NumThreads   int                    `yaml:"num_threads"`   // Number of threads for inference
+	ModelsDir    string                 `yaml:"models_dir"`    // Base directory for models
+	DefaultModel string                 `yaml:"default_model"` // Default model to use
+	Models       map[string]ModelConfig `yaml:"models"`        // Model configurations
+}
+
+// ModelConfig holds configuration for a specific ASR model
+type ModelConfig struct {
+	Encoder   string   `yaml:"encoder"`   // Path to encoder model file
+	Decoder   string   `yaml:"decoder"`   // Path to decoder model file
+	Joiner    string   `yaml:"joiner"`    // Path to joiner model file
+	Tokens    string   `yaml:"tokens"`    // Path to tokens file
+	Languages []string `yaml:"languages"` // Supported languages
+}
+
+// YAMLConfig holds configuration loaded from YAML file
+type YAMLConfig struct {
+	Server ServerConfig    `yaml:"server"`
+	Auth   AuthConfig      `yaml:"auth"`
+	Audio  AudioConfig     `yaml:"audio"`
+	Rate   RateLimitConfig `yaml:"rate"`
+	ASR    ASRConfig       `yaml:"asr"`
 }
 
 // Load loads configuration from environment variables
@@ -142,4 +173,90 @@ func getEnvInt(key string, defaultValue int) int {
 		return defaultValue
 	}
 	return intVal
+}
+
+// LoadYAML loads the configuration from a YAML file
+func LoadYAML(path string) (*YAMLConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg YAMLConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}
+
+// LoadWithYAML loads configuration from environment variables and YAML file
+func LoadWithYAML(yamlPath string) *Config {
+	// 1. Start with environment variables (and defaults)
+	cfg := Load()
+
+	// 2. Try to load YAML config
+	yamlCfg, err := LoadYAML(yamlPath)
+	if err != nil {
+		log.Printf("Warning: Could not load YAML config from %s: %v", yamlPath, err)
+		// Set defaults for ASR config if YAML fails
+		cfg.ASR = ASRConfig{
+			Provider:   "cpu",
+			NumThreads: 4,
+			ModelsDir:  "./models",
+			Models:     make(map[string]ModelConfig),
+		}
+		return cfg
+	}
+
+	// 3. Override with YAML values if present
+	if yamlCfg.Server.Port != "" {
+		cfg.Server.Port = yamlCfg.Server.Port
+	}
+	if len(yamlCfg.Server.AllowedOrigins) > 0 {
+		cfg.Server.AllowedOrigins = yamlCfg.Server.AllowedOrigins
+	}
+
+	if len(yamlCfg.Auth.APIKeys) > 0 {
+		cfg.Auth.APIKeys = yamlCfg.Auth.APIKeys
+	}
+
+	if yamlCfg.Audio.Provider != "" {
+		cfg.Audio.Provider = yamlCfg.Audio.Provider
+	}
+	if yamlCfg.Audio.MaxBufferSize > 0 {
+		cfg.Audio.MaxBufferSize = yamlCfg.Audio.MaxBufferSize
+	}
+	if yamlCfg.Audio.TranscriptionTimeout > 0 {
+		cfg.Audio.TranscriptionTimeout = yamlCfg.Audio.TranscriptionTimeout
+	}
+
+	if yamlCfg.Rate.MaxConnectionsPerIP > 0 {
+		cfg.Rate.MaxConnectionsPerIP = yamlCfg.Rate.MaxConnectionsPerIP
+	}
+	if yamlCfg.Rate.RequestsPerSecond > 0 {
+		cfg.Rate.RequestsPerSecond = yamlCfg.Rate.RequestsPerSecond
+	}
+	if yamlCfg.Rate.BurstSize > 0 {
+		cfg.Rate.BurstSize = yamlCfg.Rate.BurstSize
+	}
+	if yamlCfg.Rate.CleanupInterval > 0 {
+		cfg.Rate.CleanupInterval = yamlCfg.Rate.CleanupInterval
+	}
+
+	// ASR section is mostly YAML-only anyway
+	cfg.ASR = yamlCfg.ASR
+
+	// Set ASR defaults if missing in YAML
+	if cfg.ASR.Provider == "" {
+		cfg.ASR.Provider = "cpu"
+	}
+	if cfg.ASR.NumThreads == 0 {
+		cfg.ASR.NumThreads = 4
+	}
+	if cfg.ASR.ModelsDir == "" {
+		cfg.ASR.ModelsDir = "./models"
+	}
+
+	return cfg
 }
