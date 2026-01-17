@@ -23,6 +23,8 @@ class GribeClient {
         this.sessionInfo = document.getElementById('session-info');
         this.transcriptionLog = document.getElementById('transcription-log');
         this.currentTranscription = document.getElementById('current-transcription');
+        this.modelSelect = document.getElementById('model-select');
+        this.languageSelect = document.getElementById('language-select');
 
         this.setupEventListeners();
     }
@@ -31,6 +33,9 @@ class GribeClient {
         this.connectBtn.onclick = () => this.connect();
         this.disconnectBtn.onclick = () => this.disconnect();
         this.micBtn.onclick = () => this.toggleMicrophone();
+
+        this.modelSelect.onchange = () => this.updateSession();
+        this.languageSelect.onchange = () => this.updateSession();
     }
 
     log(message, type = 'status') {
@@ -92,16 +97,8 @@ class GribeClient {
                 this.updateStatus('connected');
                 this.log('WebSocket Connected', 'status');
 
-                // If API Key is provided, we might need a session.update event
-                // However, Gribe might handle auth via headers or keep it optional
-                if (apiKey) {
-                    this.sendEvent({
-                        type: 'session.update',
-                        session: {
-                            // Configuration can go here
-                        }
-                    });
-                }
+                // Send initial session configuration
+                this.updateSession();
             };
 
             this.ws.onclose = () => {
@@ -130,6 +127,29 @@ class GribeClient {
         if (this.ws) {
             this.ws.close();
         }
+    }
+
+    updateSession() {
+        if (!this.isConnected) return;
+
+        const model = this.modelSelect.value;
+        const language = this.languageSelect.value;
+
+        this.log(`Updating session: model=${model}, language=${language}`, 'status');
+
+        this.sendEvent({
+            type: 'session.update',
+            session: {
+                audio: {
+                    input: {
+                        transcription: {
+                            model: model,
+                            language: language
+                        }
+                    }
+                }
+            }
+        });
     }
 
     sendEvent(event) {

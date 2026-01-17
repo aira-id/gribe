@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gribe Realtime STT - OpenAI Compatible Client</title>
     <link rel="stylesheet" href="style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎙️</text></svg>">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎙️</text></svg>">
 </head>
+
 <body>
     <div class="container">
         <header>
@@ -23,6 +26,21 @@
                 <div class="form-group">
                     <label for="api-key">API Key (if required)</label>
                     <input type="password" id="api-key" placeholder="Enter API Key">
+                </div>
+                <div class="form-group">
+                    <label for="model-select">ASR Model</label>
+                    <select id="model-select">
+                        <option value="sherpa-onnx-streaming-zipformer2-id" selected>Zipformer2 Indonesian</option>
+                        <option value="sherpa-onnx-streaming-zipformer-en-2023-06-26">Zipformer English (2023-06-26)
+                        </option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="language-select">Language</label>
+                    <select id="language-select">
+                        <option value="id" selected>Indonesian (id)</option>
+                        <option value="en">English (en)</option>
+                    </select>
                 </div>
             </div>
             <div class="controls">
@@ -49,7 +67,7 @@
                 </span>
                 <span id="session-info">No Active Session</span>
             </div>
-            
+
             <div id="transcription-log" class="transcription-log">
                 <div class="log-item status">
                     <span class="timestamp">System</span>
@@ -65,4 +83,5 @@
 
     <script src="app.js"></script>
 </body>
+
 </html>
