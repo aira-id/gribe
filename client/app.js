@@ -182,6 +182,9 @@ class GribeClient {
 
         this.log(`Updating session: model=${model}, language=${language}`, 'status');
 
+        // Show loading state
+        this.setModelLoading(true);
+
         this.sendEvent({
             type: 'session.update',
             session: {
@@ -195,6 +198,20 @@ class GribeClient {
                 }
             }
         });
+    }
+
+    setModelLoading(loading) {
+        this.modelSelect.disabled = loading;
+        this.languageSelect.disabled = loading;
+        this.micBtn.disabled = loading || !this.isConnected;
+
+        if (loading) {
+            this.statusText.textContent = 'Loading model...';
+            this.statusDot.className = 'status-dot status-connecting';
+        } else {
+            this.statusText.textContent = 'Connected';
+            this.statusDot.className = 'status-dot status-connected';
+        }
     }
 
     sendEvent(event) {
@@ -213,11 +230,13 @@ class GribeClient {
                 break;
 
             case 'session.updated':
+                this.setModelLoading(false);
                 this.log('Session configuration updated', 'status');
-                this.showToast('Session configuration updated successfully', 'success', 'Session Updated', 3000);
+                this.showToast('Model loaded successfully', 'success', 'Ready', 3000);
                 break;
 
             case 'error':
+                this.setModelLoading(false);
                 this.handleError(event.error);
                 break;
 
