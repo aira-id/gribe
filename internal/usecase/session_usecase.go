@@ -12,7 +12,6 @@ import (
 
 	"github.com/aira-id/gribe/internal/config"
 	"github.com/aira-id/gribe/internal/domain"
-	"github.com/aira-id/gribe/internal/pkg/mock"
 )
 
 // Conn defines the interface for WebSocket connections
@@ -26,20 +25,21 @@ type Conn interface {
 type SessionUsecase struct {
 	sessionManager       *SessionManager
 	idGen                *IDGenerator
-	asrProvider          domain.ASRProvider
-	asrConfig            *config.Config                // Store config for reconfiguration
+	asrRegistry          *ASRModelRegistry            // Registry for lazy model loading
+	asrProvider          domain.ASRProvider           // Current ASR provider (nil until session.update)
 	vadProviders         map[string]*SimpleVADProvider // sessionID -> VAD
 	vadMu                sync.RWMutex
 	maxAudioBufferSize   int
 	transcriptionTimeout time.Duration
 }
 
-// NewSessionUsecase creates a new session usecase
+// NewSessionUsecase creates a new session usecase (for testing, no config)
 func NewSessionUsecase() *SessionUsecase {
 	return &SessionUsecase{
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
-		asrProvider:          mock.New(),
+		asrRegistry:          nil, // No registry without config
+		asrProvider:          nil, // No provider until session.update
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   15 * 1024 * 1024, // 15MB default
 		transcriptionTimeout: 30 * time.Second,
@@ -47,62 +47,22 @@ func NewSessionUsecase() *SessionUsecase {
 }
 
 // NewSessionUsecaseWithConfig creates a session usecase with configuration
+// Models are NOT loaded eagerly - they are loaded lazily on session.update
 func NewSessionUsecaseWithConfig(cfg *config.Config) *SessionUsecase {
-	// Build provider-specific config from ASR YAML config
-	providerConfig := make(map[string]interface{})
+	// Create registry for lazy model loading (no models loaded yet)
+	registry := NewASRModelRegistry(&cfg.ASR)
 
-	// Get the default model config
-	var modelConfig *config.ModelConfig
-	if cfg.ASR.DefaultModel != "" {
-		if mc, ok := cfg.ASR.Models[cfg.ASR.DefaultModel]; ok {
-			modelConfig = &mc
-		}
-	}
-
-	// Populate provider config from YAML
-	providerConfig["provider"] = cfg.ASR.Provider
-	providerConfig["num_threads"] = cfg.ASR.NumThreads
-	providerConfig["models_dir"] = cfg.ASR.ModelsDir
-	providerConfig["model_name"] = cfg.ASR.DefaultModel
-
-	if modelConfig != nil {
-		providerConfig["encoder"] = modelConfig.Encoder
-		providerConfig["decoder"] = modelConfig.Decoder
-		providerConfig["joiner"] = modelConfig.Joiner
-		providerConfig["tokens"] = modelConfig.Tokens
-		providerConfig["languages"] = modelConfig.Languages
-		// Use first language as default if available
-		if len(modelConfig.Languages) > 0 {
-			providerConfig["language"] = modelConfig.Languages[0]
-		}
-	}
-
-	// Use factory to create ASR provider
-	providerType := "sherpa-onnx" // Hardcoded fallback
-	if modelConfig != nil && modelConfig.Provider != "" {
-		providerType = modelConfig.Provider
-	}
-
-	asrConfig := &ASRProviderConfig{
-		Type:                   ASRProviderType(providerType),
-		ProviderSpecificConfig: providerConfig,
-	}
-
-	factory := NewASRProviderFactory()
-	asrProvider, err := factory.Create(asrConfig)
-	if err != nil {
-		log.Printf("[CRITICAL] Failed to create ASR provider '%s': %v", providerType, err)
-		log.Printf("[INFO] Falling back to mock provider for session handling")
-		asrProvider = mock.New()
-	} else {
-		log.Printf("[INFO] Successfully initialized ASR provider: %s", providerType)
+	log.Printf("[INFO] ASR Model Registry initialized with %d available models (lazy loading enabled)",
+		len(cfg.ASR.Models))
+	for modelName := range cfg.ASR.Models {
+		log.Printf("[INFO]   - %s", modelName)
 	}
 
 	return &SessionUsecase{
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
-		asrProvider:          asrProvider,
-		asrConfig:            cfg,
+		asrRegistry:          registry,
+		asrProvider:          nil, // No provider until session.update
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   cfg.Audio.MaxBufferSize,
 		transcriptionTimeout: cfg.Audio.TranscriptionTimeout,
@@ -114,39 +74,12 @@ func NewSessionUsecaseWithASR(asr domain.ASRProvider) *SessionUsecase {
 	return &SessionUsecase{
 		sessionManager:       NewSessionManager(),
 		idGen:                NewIDGenerator(),
+		asrRegistry:          nil,
 		asrProvider:          asr,
 		vadProviders:         make(map[string]*SimpleVADProvider),
 		maxAudioBufferSize:   15 * 1024 * 1024, // 15MB default
 		transcriptionTimeout: 30 * time.Second,
 	}
-}
-
-// NewSessionUsecaseWithSherpaOnnx creates a session usecase with sherpa-onnx ASR provider
-func NewSessionUsecaseWithSherpaOnnx(config *domain.TranscriptionConfig) (*SessionUsecase, error) {
-	asrConfig := &ASRProviderConfig{
-		Type:                   ProviderSherpaOnnx,
-		TranscriptionConfig:    config,
-		ProviderSpecificConfig: make(map[string]interface{}),
-	}
-	return NewSessionUsecaseWithASRProvider(asrConfig)
-}
-
-// NewSessionUsecaseWithASRProvider creates a session usecase with an ASR provider from factory
-func NewSessionUsecaseWithASRProvider(asrConfig *ASRProviderConfig) (*SessionUsecase, error) {
-	factory := NewASRProviderFactory()
-	asrProvider, err := factory.Create(asrConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ASR provider: %w", err)
-	}
-
-	return &SessionUsecase{
-		sessionManager:       NewSessionManager(),
-		idGen:                NewIDGenerator(),
-		asrProvider:          asrProvider,
-		vadProviders:         make(map[string]*SimpleVADProvider),
-		maxAudioBufferSize:   15 * 1024 * 1024, // 15MB default
-		transcriptionTimeout: 30 * time.Second,
-	}, nil
 }
 
 // getOrCreateVAD gets or creates a VAD provider for a session
@@ -318,10 +251,11 @@ func (u *SessionUsecase) handleSessionUpdate(conn Conn, state *domain.SessionSta
 	conn.WriteJSON(sessionUpdatedEvent)
 }
 
-// reconfigureASRProvider reconfigures the ASR provider with a new model and language
+// reconfigureASRProvider loads/gets the ASR provider for the requested model and language
+// Uses the registry for singleton pattern - models are loaded once and reused
 func (u *SessionUsecase) reconfigureASRProvider(conn Conn, eventID, modelName, language string) error {
-	// Check if config is available
-	if u.asrConfig == nil {
+	// Check if registry is available
+	if u.asrRegistry == nil {
 		u.sendError(conn, eventID, "server_error", "configuration_unavailable",
 			"ASR configuration not available. Server was not initialized with YAML config.", nil)
 		return fmt.Errorf("ASR configuration not available")
@@ -341,77 +275,43 @@ func (u *SessionUsecase) reconfigureASRProvider(conn Conn, eventID, modelName, l
 		return fmt.Errorf("language is required")
 	}
 
-	// Check if model exists in config
-	modelConfig, exists := u.asrConfig.ASR.Models[modelName]
-	if !exists {
-		availableModels := make([]string, 0, len(u.asrConfig.ASR.Models))
-		for name := range u.asrConfig.ASR.Models {
-			availableModels = append(availableModels, name)
-		}
-		u.sendError(conn, eventID, "invalid_request_error", "invalid_model",
-			fmt.Sprintf("Model '%s' not found. Available models: %v", modelName, availableModels),
-			"audio.input.transcription.model")
-		return fmt.Errorf("model not found: %s", modelName)
-	}
-
-	// Validate language is supported by the model
-	languageSupported := false
-	for _, lang := range modelConfig.Languages {
-		if lang == language {
-			languageSupported = true
-			break
-		}
-	}
-	if !languageSupported {
-		u.sendError(conn, eventID, "invalid_request_error", "unsupported_language",
-			fmt.Sprintf("Language '%s' is not supported by model '%s'. Supported languages: %v",
-				language, modelName, modelConfig.Languages),
-			"audio.input.transcription.language")
-		return fmt.Errorf("unsupported language: %s", language)
-	}
-
-	// Build provider config for the new model/language
-	providerConfig := make(map[string]interface{})
-	providerConfig["provider"] = u.asrConfig.ASR.Provider
-	providerConfig["num_threads"] = u.asrConfig.ASR.NumThreads
-	providerConfig["models_dir"] = u.asrConfig.ASR.ModelsDir
-	providerConfig["model_name"] = modelName
-	providerConfig["encoder"] = modelConfig.Encoder
-	providerConfig["decoder"] = modelConfig.Decoder
-	providerConfig["joiner"] = modelConfig.Joiner
-	providerConfig["tokens"] = modelConfig.Tokens
-	providerConfig["languages"] = modelConfig.Languages
-	providerConfig["language"] = language
-
-	// Create new ASR provider
-	providerType := "sherpa-onnx" // Hardcoded fallback
-	if modelConfig.Provider != "" {
-		providerType = modelConfig.Provider
-	}
-
-	asrConfig := &ASRProviderConfig{
-		Type:                   ASRProviderType(providerType),
-		ProviderSpecificConfig: providerConfig,
-	}
-
-	factory := NewASRProviderFactory()
-	newProvider, err := factory.Create(asrConfig)
+	// Get model from registry (lazy loading with singleton pattern)
+	provider, err := u.asrRegistry.GetModel(modelName, language)
 	if err != nil {
-		u.sendError(conn, eventID, "server_error", "provider_initialization_failed",
-			fmt.Sprintf("Failed to initialize ASR provider: %v", err), nil)
-		return fmt.Errorf("failed to initialize ASR provider: %w", err)
+		// Determine error type based on error message
+		errMsg := err.Error()
+		if contains(errMsg, "not found") {
+			u.sendError(conn, eventID, "invalid_request_error", "invalid_model",
+				err.Error(), "audio.input.transcription.model")
+		} else if contains(errMsg, "not supported") {
+			u.sendError(conn, eventID, "invalid_request_error", "unsupported_language",
+				err.Error(), "audio.input.transcription.language")
+		} else {
+			u.sendError(conn, eventID, "server_error", "provider_initialization_failed",
+				err.Error(), nil)
+		}
+		return err
 	}
 
-	// Close old provider if it has a Close method
-	if closer, ok := u.asrProvider.(interface{ Close() error }); ok {
-		closer.Close()
-	}
+	// Update the ASR provider for this session
+	u.asrProvider = provider
 
-	// Update the ASR provider
-	u.asrProvider = newProvider
-
-	log.Printf("[INFO] ASR provider reconfigured with model: %s, language: %s", modelName, language)
+	log.Printf("[INFO] ASR provider set to model: %s, language: %s", modelName, language)
 	return nil
+}
+
+// contains checks if s contains substr (simple helper to avoid importing strings)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================
@@ -604,6 +504,23 @@ func (u *SessionUsecase) commitAndTranscribe(conn Conn, state *domain.SessionSta
 
 // transcribeAudio performs speech-to-text transcription and sends events
 func (u *SessionUsecase) transcribeAudio(conn Conn, state *domain.SessionState, itemID string, audioData []byte) {
+	// Check if ASR provider is configured
+	if u.asrProvider == nil {
+		failedEvent := &domain.ErrorServerEvent{
+			BaseEvent: domain.BaseEvent{
+				EventID: u.idGen.GenerateEventID(),
+				Type:    domain.EventConversationItemInputAudioTranscriptionFailed,
+			},
+			Error: &domain.ErrorDetail{
+				Type:    "transcription_error",
+				Code:    "provider_not_configured",
+				Message: "ASR provider not configured. Send session.update with audio.input.transcription.model and audio.input.transcription.language first.",
+			},
+		}
+		conn.WriteJSON(failedEvent)
+		return
+	}
+
 	// Get transcription config from session
 	var transcriptionConfig *domain.TranscriptionConfig
 	if state.Config.Audio != nil && state.Config.Audio.Input != nil {
@@ -613,7 +530,7 @@ func (u *SessionUsecase) transcribeAudio(conn Conn, state *domain.SessionState, 
 	// Use default config if not specified
 	if transcriptionConfig == nil {
 		transcriptionConfig = &domain.TranscriptionConfig{
-			Model:    "whisper-1",
+			Model:    "default",
 			Language: "en",
 		}
 	}

@@ -4,140 +4,128 @@ import (
 	"context"
 	"log"
 
+	"github.com/aira-id/gribe/internal/config"
 	"github.com/aira-id/gribe/internal/domain"
 )
 
-// Example functions demonstrating modular ASR provider usage
+// Example functions demonstrating modular ASR provider usage with the registry pattern
 
-// ExampleUsingFactory demonstrates using the ASR provider factory
-func ExampleUsingFactory() {
-	factory := NewASRProviderFactory()
+// ExampleUsingRegistry demonstrates using the ASR model registry
+func ExampleUsingRegistry(cfg *config.ASRConfig) {
+	registry := NewASRModelRegistry(cfg)
+	defer registry.Close()
 
-	// Create a sherpa-onnx provider
-	config := &ASRProviderConfig{
-		Type: ProviderSherpaOnnx,
-		TranscriptionConfig: &domain.TranscriptionConfig{
-			Model:    "zipformer",
-			Language: "en",
-		},
-	}
+	// List available models
+	models := registry.GetAvailableModels()
+	log.Printf("Available models: %v", models)
 
-	provider, err := factory.Create(config)
+	// Get a model (lazy loading - first call loads, subsequent calls reuse)
+	provider, err := registry.GetModel("sherpa-onnx-streaming-zipformer2-id", "id")
 	if err != nil {
-		log.Fatal("Failed to create provider:", err)
+		log.Fatal("Failed to get model:", err)
 	}
-	defer provider.Close()
 
-	log.Printf("Provider created: %T", provider)
+	log.Printf("Provider loaded: %T", provider)
 	log.Printf("Supported models: %v", provider.GetSupportedModels())
 	log.Printf("Supported languages: %v", provider.GetSupportedLanguages())
+
+	// Check loaded models (should show the model we just loaded)
+	loaded := registry.GetLoadedModels()
+	log.Printf("Loaded models: %v", loaded)
 }
 
-// ExampleSwitchingProviders demonstrates switching between different providers
-func ExampleSwitchingProviders() {
-	factory := NewASRProviderFactory()
+// ExampleSingletonPattern demonstrates the singleton pattern for model loading
+func ExampleSingletonPattern(cfg *config.ASRConfig) {
+	registry := NewASRModelRegistry(cfg)
+	defer registry.Close()
 
-	// Get list of available providers
-	available := factory.GetSupportedProviders()
-	log.Printf("Available providers: %v", available)
+	modelName := "sherpa-onnx-streaming-zipformer2-id"
+	language := "id"
 
-	// Try creating each provider
-	for _, providerType := range available {
-		config := &ASRProviderConfig{
-			Type: providerType,
-		}
+	// First call - loads the model
+	log.Println("First call - loading model...")
+	provider1, err := registry.GetModel(modelName, language)
+	if err != nil {
+		log.Fatal("Failed to get model:", err)
+	}
+	log.Printf("Provider 1: %p", provider1)
 
-		provider, err := factory.Create(config)
+	// Second call - reuses the already loaded model
+	log.Println("Second call - should reuse loaded model...")
+	provider2, err := registry.GetModel(modelName, language)
+	if err != nil {
+		log.Fatal("Failed to get model:", err)
+	}
+	log.Printf("Provider 2: %p", provider2)
+
+	// Both should point to the same instance
+	if provider1 == provider2 {
+		log.Println("✓ Same provider instance reused (singleton pattern working)")
+	} else {
+		log.Println("✗ Different instances (unexpected)")
+	}
+}
+
+// ExampleMultipleModels demonstrates loading multiple models
+func ExampleMultipleModels(cfg *config.ASRConfig) {
+	registry := NewASRModelRegistry(cfg)
+	defer registry.Close()
+
+	// Load multiple models
+	models := registry.GetAvailableModels()
+	for _, modelName := range models {
+		// Get supported languages for this model
+		languages, err := registry.GetModelLanguages(modelName)
 		if err != nil {
-			log.Printf("Failed to create %s provider: %v", providerType, err)
+			log.Printf("Failed to get languages for %s: %v", modelName, err)
 			continue
 		}
 
-		log.Printf("Successfully created %s provider", providerType)
-		models := provider.GetSupportedModels()
-		log.Printf("  Models: %d available", len(models))
+		if len(languages) == 0 {
+			log.Printf("Model %s has no languages defined", modelName)
+			continue
+		}
 
-		provider.Close()
+		// Load model with first supported language
+		provider, err := registry.GetModel(modelName, languages[0])
+		if err != nil {
+			log.Printf("Failed to load model %s: %v", modelName, err)
+			continue
+		}
+
+		log.Printf("✓ Loaded model: %s (language: %s)", modelName, languages[0])
+		log.Printf("  Provider type: %T", provider)
 	}
+
+	// Check all loaded models
+	loaded := registry.GetLoadedModels()
+	log.Printf("Total loaded models: %d", len(loaded))
 }
 
-// ExampleConfigDriven demonstrates configuration-driven provider selection
-func ExampleConfigDriven(providerName string) {
-	factory := NewASRProviderFactory()
-
-	config := &ASRProviderConfig{
-		Type: ASRProviderType(providerName), // e.g., "sherpa-onnx", "whisper-cpp", "mock"
-		TranscriptionConfig: &domain.TranscriptionConfig{
-			Model:    "zipformer",
-			Language: "en",
-		},
-	}
-
-	provider, err := factory.Create(config)
-	if err != nil {
-		log.Fatalf("Failed to create %s provider: %v", providerName, err)
-	}
-	defer provider.Close()
-
-	log.Printf("Using %s provider with model %s", providerName, config.TranscriptionConfig.Model)
-}
-
-// ExampleCustomProvider demonstrates registering a custom provider
-func ExampleCustomProvider() {
-	factory := NewASRProviderFactory()
-
-	// Define a custom provider type
-	customType := ASRProviderType("custom-asr")
-
-	// Register a custom creator function
-	factory.Register(customType, func(config *ASRProviderConfig) (domain.ASRProvider, error) {
-		// Return any provider instance, in this case a mock
-		return NewMockASRProvider(), nil
-	})
-
-	// Use the custom provider
-	config := &ASRProviderConfig{
-		Type: customType,
-	}
-
-	provider, err := factory.Create(config)
-	if err != nil {
-		log.Fatal("Failed to create custom provider:", err)
-	}
-	defer provider.Close()
-
-	log.Printf("Custom provider registered and created successfully")
-}
-
-// ExampleTranscribeWithDifferentProviders demonstrates transcribing with different providers
-func ExampleTranscribeWithDifferentProviders(audioBytes []byte) {
-	factory := NewASRProviderFactory()
-	ctx := context.Background()
-
-	// Example audio bytes (in real usage, this would be actual audio data)
+// ExampleTranscribeWithRegistry demonstrates transcribing with registry-managed providers
+func ExampleTranscribeWithRegistry(cfg *config.ASRConfig, audioBytes []byte) {
 	if len(audioBytes) == 0 {
 		log.Println("No audio data provided")
 		return
 	}
 
-	transcConfig := &domain.TranscriptionConfig{
-		Model:    "zipformer",
-		Language: "en",
-	}
+	registry := NewASRModelRegistry(cfg)
+	defer registry.Close()
 
-	// Try transcribing with mock provider
-	mockConfig := &ASRProviderConfig{
-		Type:                   ProviderMock,
-		TranscriptionConfig:    transcConfig,
-		ProviderSpecificConfig: make(map[string]interface{}),
-	}
+	ctx := context.Background()
 
-	provider, err := factory.Create(mockConfig)
+	// Get provider for Indonesian model
+	provider, err := registry.GetModel("sherpa-onnx-streaming-zipformer2-id", "id")
 	if err != nil {
-		log.Fatal("Failed to create mock provider:", err)
+		log.Fatal("Failed to get model:", err)
 	}
 
-	log.Println("Transcribing with mock provider...")
+	transcConfig := &domain.TranscriptionConfig{
+		Model:    "sherpa-onnx-streaming-zipformer2-id",
+		Language: "id",
+	}
+
+	log.Println("Transcribing with Indonesian model...")
 	results, err := provider.Transcribe(ctx, audioBytes, transcConfig)
 	if err != nil {
 		log.Fatal("Transcription error:", err)
@@ -146,98 +134,52 @@ func ExampleTranscribeWithDifferentProviders(audioBytes []byte) {
 	for chunk := range results {
 		log.Printf("  [%v] %s", chunk.IsFinal, chunk.Text)
 	}
-
-	provider.Close()
-
-	// Try transcribing with sherpa-onnx provider
-	sherpaConfig := &ASRProviderConfig{
-		Type:                   ProviderSherpaOnnx,
-		TranscriptionConfig:    transcConfig,
-		ProviderSpecificConfig: make(map[string]interface{}),
-	}
-
-	provider, err = factory.Create(sherpaConfig)
-	if err != nil {
-		log.Printf("Failed to create sherpa-onnx provider: %v (may need library)", err)
-		return
-	}
-
-	log.Println("Transcribing with sherpa-onnx provider...")
-	results, err = provider.Transcribe(ctx, audioBytes, transcConfig)
-	if err != nil {
-		log.Fatal("Transcription error:", err)
-	}
-
-	for chunk := range results {
-		log.Printf("  [%v] %s", chunk.IsFinal, chunk.Text)
-	}
-
-	provider.Close()
 }
 
-// ExampleSessionWithFactory demonstrates creating SessionUsecase with factory
-func ExampleSessionWithFactory() {
-	// Using mock provider
-	mockConfig := &ASRProviderConfig{
-		Type: ProviderMock,
-	}
+// ExampleSessionWithRegistry demonstrates creating SessionUsecase with registry
+func ExampleSessionWithRegistry(cfg *config.Config) {
+	// Create session usecase with config (models loaded lazily)
+	usecase := NewSessionUsecaseWithConfig(cfg)
 
-	usecase, err := NewSessionUsecaseWithASRProvider(mockConfig)
-	if err != nil {
-		log.Fatal("Failed to create session usecase:", err)
-	}
-
-	log.Printf("SessionUsecase created with mock provider: %T", usecase.asrProvider)
-
-	// Using sherpa-onnx provider
-	sherpaConfig := &ASRProviderConfig{
-		Type: ProviderSherpaOnnx,
-		TranscriptionConfig: &domain.TranscriptionConfig{
-			Model:    "zipformer",
-			Language: "en",
-		},
-	}
-
-	usecase, err = NewSessionUsecaseWithASRProvider(sherpaConfig)
-	if err != nil {
-		log.Printf("Failed to create session with sherpa-onnx: %v", err)
-		return
-	}
-
-	log.Printf("SessionUsecase created with sherpa-onnx provider: %T", usecase.asrProvider)
+	log.Printf("SessionUsecase created with registry")
+	log.Printf("  Available models: %v", usecase.asrRegistry.GetAvailableModels())
+	log.Printf("  Loaded models: %v (empty - lazy loading)", usecase.asrRegistry.GetLoadedModels())
+	log.Printf("  ASR Provider: %v (nil until session.update)", usecase.asrProvider)
 }
 
-// ExampleProviderCapabilities demonstrates checking provider capabilities
-func ExampleProviderCapabilities() {
-	factory := NewASRProviderFactory()
+// ExampleProviderCapabilities demonstrates checking provider capabilities via registry
+func ExampleProviderCapabilities(cfg *config.ASRConfig) {
+	registry := NewASRModelRegistry(cfg)
+	defer registry.Close()
 
-	providers := factory.GetSupportedProviders()
+	models := registry.GetAvailableModels()
 
-	for _, providerType := range providers {
-		config := &ASRProviderConfig{
-			Type: providerType,
-		}
-
-		provider, err := factory.Create(config)
+	for _, modelName := range models {
+		languages, err := registry.GetModelLanguages(modelName)
 		if err != nil {
-			log.Printf("⚠️  %s: Failed to initialize (%v)", providerType, err)
+			log.Printf("⚠️  %s: Failed to get languages (%v)", modelName, err)
 			continue
 		}
 
-		models := provider.GetSupportedModels()
-		languages := provider.GetSupportedLanguages()
-
-		log.Printf("✓ %s", providerType)
-		log.Printf("  Models: %d", len(models))
-		if len(models) > 0 {
-			log.Printf("    Examples: %v", models[:minInt(3, len(models))])
-		}
-		log.Printf("  Languages: %d", len(languages))
-		if len(languages) > 0 {
-			log.Printf("    Examples: %v", languages[:minInt(3, len(languages))])
+		if len(languages) == 0 {
+			log.Printf("⚠️  %s: No languages defined", modelName)
+			continue
 		}
 
-		provider.Close()
+		// Try to load the model
+		provider, err := registry.GetModel(modelName, languages[0])
+		if err != nil {
+			log.Printf("⚠️  %s: Failed to load (%v)", modelName, err)
+			continue
+		}
+
+		supportedModels := provider.GetSupportedModels()
+		supportedLanguages := provider.GetSupportedLanguages()
+
+		log.Printf("✓ %s", modelName)
+		log.Printf("  Languages: %v", languages)
+		log.Printf("  Provider models: %d", len(supportedModels))
+		log.Printf("  Provider languages: %d", len(supportedLanguages))
 	}
 }
 
