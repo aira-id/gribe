@@ -302,3 +302,197 @@ type RateLimitsUpdatedEvent struct {
 	BaseEvent
 	RateLimits []RateLimit `json:"rate_limits"`
 }
+
+// ============================================================================
+// TRANSCRIPTION SESSION EVENTS (OpenAI Realtime Transcription API compatible)
+// ============================================================================
+
+// TranscriptionSessionUpdateClientEvent represents transcription_session.update client event
+// This is the flattened structure matching OpenAI's transcription API
+type TranscriptionSessionUpdateClientEvent struct {
+	BaseEvent
+	Session *TranscriptionSessionConfig `json:"session"`
+}
+
+// TranscriptionSessionCreatedEvent represents transcription_session.created server event
+type TranscriptionSessionCreatedEvent struct {
+	BaseEvent
+	Session *TranscriptionSessionConfig `json:"session"`
+}
+
+// TranscriptionSessionUpdatedEvent represents transcription_session.updated server event
+type TranscriptionSessionUpdatedEvent struct {
+	BaseEvent
+	Session *TranscriptionSessionConfig `json:"session"`
+}
+
+// TranscriptionSessionConfig represents the flattened transcription session configuration
+// matching OpenAI's Realtime Transcription API structure
+type TranscriptionSessionConfig struct {
+	Object                    string                           `json:"object,omitempty"`                       // "realtime.transcription_session"
+	Type                      string                           `json:"type,omitempty"`                         // Always "transcription"
+	ID                        string                           `json:"id,omitempty"`                           // Session ID
+	InputAudioFormat          string                           `json:"input_audio_format,omitempty"`           // "pcm16", "g711_ulaw", "g711_alaw"
+	InputAudioTranscription   *InputAudioTranscriptionConfig   `json:"input_audio_transcription,omitempty"`    // Transcription settings
+	TurnDetection             *TurnDetectionConfig             `json:"turn_detection,omitempty"`               // VAD settings
+	InputAudioNoiseReduction  *InputAudioNoiseReductionConfig  `json:"input_audio_noise_reduction,omitempty"`  // Noise reduction settings
+	Include                   []string                         `json:"include,omitempty"`                      // e.g., ["item.input_audio_transcription.logprobs"]
+	ExpiresAt                 int64                            `json:"expires_at,omitempty"`                   // Unix timestamp
+}
+
+// InputAudioTranscriptionConfig represents transcription settings in OpenAI format
+type InputAudioTranscriptionConfig struct {
+	Model    string `json:"model,omitempty"`    // "whisper-1", "gpt-4o-transcribe", etc.
+	Language string `json:"language,omitempty"` // ISO-639-1 code like "en"
+	Prompt   string `json:"prompt,omitempty"`   // Optional prompt to guide transcription
+}
+
+// TurnDetectionConfig represents VAD settings in OpenAI format
+type TurnDetectionConfig struct {
+	Type              string  `json:"type,omitempty"`               // "server_vad" or "semantic_vad"
+	Threshold         float64 `json:"threshold,omitempty"`          // 0.0-1.0
+	PrefixPaddingMs   int     `json:"prefix_padding_ms,omitempty"`  // milliseconds
+	SilenceDurationMs int     `json:"silence_duration_ms,omitempty"`// milliseconds
+}
+
+// InputAudioNoiseReductionConfig represents noise reduction settings in OpenAI format
+type InputAudioNoiseReductionConfig struct {
+	Type string `json:"type,omitempty"` // "near_field", "far_field"
+}
+
+// NewTranscriptionSessionConfig creates a TranscriptionSessionConfig from a Session
+// This converts from the nested structure to the flattened OpenAI-compatible format
+func NewTranscriptionSessionConfig(session *Session) *TranscriptionSessionConfig {
+	config := &TranscriptionSessionConfig{
+		Object:    "realtime.transcription_session",
+		Type:      "transcription",
+		ID:        session.ID,
+		ExpiresAt: session.ExpiresAt,
+		Include:   session.Include,
+	}
+
+	// Map audio input format
+	if session.Audio != nil && session.Audio.Input != nil {
+		if session.Audio.Input.Format != nil {
+			// Convert format type to OpenAI naming
+			switch session.Audio.Input.Format.Type {
+			case "audio/pcm":
+				config.InputAudioFormat = "pcm16"
+			case "audio/pcmu":
+				config.InputAudioFormat = "g711_ulaw"
+			case "audio/pcma":
+				config.InputAudioFormat = "g711_alaw"
+			default:
+				config.InputAudioFormat = "pcm16"
+			}
+		}
+
+		// Map transcription config
+		if session.Audio.Input.Transcription != nil {
+			config.InputAudioTranscription = &InputAudioTranscriptionConfig{
+				Model:    session.Audio.Input.Transcription.Model,
+				Language: session.Audio.Input.Transcription.Language,
+				Prompt:   session.Audio.Input.Transcription.Prompt,
+			}
+		}
+
+		// Map turn detection (VAD)
+		if session.Audio.Input.TurnDetection != nil {
+			config.TurnDetection = &TurnDetectionConfig{
+				Type:              session.Audio.Input.TurnDetection.Type,
+				Threshold:         session.Audio.Input.TurnDetection.Threshold,
+				PrefixPaddingMs:   session.Audio.Input.TurnDetection.PrefixPaddingMs,
+				SilenceDurationMs: session.Audio.Input.TurnDetection.SilenceDurationMs,
+			}
+		}
+
+		// Map noise reduction
+		if session.Audio.Input.NoiseReduction != nil {
+			config.InputAudioNoiseReduction = &InputAudioNoiseReductionConfig{
+				Type: session.Audio.Input.NoiseReduction.Type,
+			}
+		}
+	}
+
+	return config
+}
+
+// ApplyToSession applies TranscriptionSessionConfig updates to a Session
+// This converts from the flattened OpenAI format back to the nested structure
+func (tsc *TranscriptionSessionConfig) ApplyToSession(session *Session) {
+	// Ensure session type is transcription
+	session.Type = "transcription"
+
+	// Initialize audio config if needed
+	if session.Audio == nil {
+		session.Audio = &AudioConfig{}
+	}
+	if session.Audio.Input == nil {
+		session.Audio.Input = &AudioInput{}
+	}
+
+	// Apply input audio format
+	if tsc.InputAudioFormat != "" {
+		if session.Audio.Input.Format == nil {
+			session.Audio.Input.Format = &AudioFormat{Rate: 24000}
+		}
+		switch tsc.InputAudioFormat {
+		case "pcm16":
+			session.Audio.Input.Format.Type = "audio/pcm"
+		case "g711_ulaw":
+			session.Audio.Input.Format.Type = "audio/pcmu"
+		case "g711_alaw":
+			session.Audio.Input.Format.Type = "audio/pcma"
+		}
+	}
+
+	// Apply transcription config
+	if tsc.InputAudioTranscription != nil {
+		if session.Audio.Input.Transcription == nil {
+			session.Audio.Input.Transcription = &TranscriptionConfig{}
+		}
+		if tsc.InputAudioTranscription.Model != "" {
+			session.Audio.Input.Transcription.Model = tsc.InputAudioTranscription.Model
+		}
+		if tsc.InputAudioTranscription.Language != "" {
+			session.Audio.Input.Transcription.Language = tsc.InputAudioTranscription.Language
+		}
+		if tsc.InputAudioTranscription.Prompt != "" {
+			session.Audio.Input.Transcription.Prompt = tsc.InputAudioTranscription.Prompt
+		}
+	}
+
+	// Apply turn detection (VAD)
+	if tsc.TurnDetection != nil {
+		if session.Audio.Input.TurnDetection == nil {
+			session.Audio.Input.TurnDetection = &TurnDetection{}
+		}
+		if tsc.TurnDetection.Type != "" {
+			session.Audio.Input.TurnDetection.Type = tsc.TurnDetection.Type
+		}
+		if tsc.TurnDetection.Threshold > 0 {
+			session.Audio.Input.TurnDetection.Threshold = tsc.TurnDetection.Threshold
+		}
+		if tsc.TurnDetection.PrefixPaddingMs > 0 {
+			session.Audio.Input.TurnDetection.PrefixPaddingMs = tsc.TurnDetection.PrefixPaddingMs
+		}
+		if tsc.TurnDetection.SilenceDurationMs > 0 {
+			session.Audio.Input.TurnDetection.SilenceDurationMs = tsc.TurnDetection.SilenceDurationMs
+		}
+	}
+
+	// Apply noise reduction
+	if tsc.InputAudioNoiseReduction != nil {
+		if session.Audio.Input.NoiseReduction == nil {
+			session.Audio.Input.NoiseReduction = &NoiseReduction{}
+		}
+		if tsc.InputAudioNoiseReduction.Type != "" {
+			session.Audio.Input.NoiseReduction.Type = tsc.InputAudioNoiseReduction.Type
+		}
+	}
+
+	// Apply include
+	if len(tsc.Include) > 0 {
+		session.Include = tsc.Include
+	}
+}

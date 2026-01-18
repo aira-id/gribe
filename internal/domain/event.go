@@ -52,4 +52,9 @@ const (
 
 	// Rate Limits
 	EventRateLimitsUpdated EventType = "rate_limits.updated"
+
+	// Transcription Session Events (for OpenAI Realtime Transcription API compatibility)
+	EventTranscriptionSessionUpdate  EventType = "transcription_session.update"  // Client event
+	EventTranscriptionSessionCreated EventType = "transcription_session.created" // Server event
+	EventTranscriptionSessionUpdated EventType = "transcription_session.updated" // Server event
 )

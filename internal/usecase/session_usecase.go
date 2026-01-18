@@ -115,8 +115,23 @@ func (u *SessionUsecase) removeVAD(sessionID string) {
 	}
 }
 
+// SessionIntent represents the type of session to create
+type SessionIntent string
+
+const (
+	IntentRealtime      SessionIntent = "realtime"
+	IntentTranscription SessionIntent = "transcription"
+)
+
 // HandleNewConnection handles a new WebSocket connection
+// For transcription mode, pass intent="transcription"
 func (u *SessionUsecase) HandleNewConnection(conn interface{}) {
+	u.HandleNewConnectionWithIntent(conn, IntentRealtime)
+}
+
+// HandleNewConnectionWithIntent handles a new WebSocket connection with specified intent
+// intent can be "realtime" (default) or "transcription"
+func (u *SessionUsecase) HandleNewConnectionWithIntent(conn interface{}, intent SessionIntent) {
 	wsConn, ok := conn.(Conn)
 	if !ok {
 		log.Println("Invalid connection type")
@@ -126,25 +141,50 @@ func (u *SessionUsecase) HandleNewConnection(conn interface{}) {
 	// Create session and conversation
 	sessionID := u.idGen.GenerateSessionID()
 	conversationID := u.idGen.GenerateConversationID()
-	state := u.sessionManager.CreateSession(sessionID, "gpt-realtime-2025-08-28", conversationID)
+
+	var state *domain.SessionState
+	if intent == IntentTranscription {
+		// Create transcription-only session
+		state = u.sessionManager.CreateTranscriptionSession(sessionID, "gpt-4o-transcribe", conversationID, "en")
+	} else {
+		// Create realtime session (default)
+		state = u.sessionManager.CreateSession(sessionID, "gpt-realtime-2025-08-28", conversationID)
+	}
 
 	// Set audio buffer size limit
 	if u.maxAudioBufferSize > 0 {
 		state.AudioBuffer.SetMaxSize(u.maxAudioBufferSize)
 	}
 
-	// Send session.created event
-	sessionCreatedEvent := &domain.SessionCreatedEvent{
-		BaseEvent: domain.BaseEvent{
-			EventID: u.idGen.GenerateEventID(),
-			Type:    domain.EventSessionCreated,
-		},
-		Session: state.Config,
-	}
+	// Send appropriate session.created event based on intent
+	if intent == IntentTranscription {
+		// Send transcription_session.created event with flattened format
+		transcriptionSessionCreatedEvent := &domain.TranscriptionSessionCreatedEvent{
+			BaseEvent: domain.BaseEvent{
+				EventID: u.idGen.GenerateEventID(),
+				Type:    domain.EventTranscriptionSessionCreated,
+			},
+			Session: domain.NewTranscriptionSessionConfig(state.Config),
+		}
 
-	if err := wsConn.WriteJSON(sessionCreatedEvent); err != nil {
-		log.Println("Error sending session.created:", err)
-		return
+		if err := wsConn.WriteJSON(transcriptionSessionCreatedEvent); err != nil {
+			log.Println("Error sending transcription_session.created:", err)
+			return
+		}
+	} else {
+		// Send session.created event
+		sessionCreatedEvent := &domain.SessionCreatedEvent{
+			BaseEvent: domain.BaseEvent{
+				EventID: u.idGen.GenerateEventID(),
+				Type:    domain.EventSessionCreated,
+			},
+			Session: state.Config,
+		}
+
+		if err := wsConn.WriteJSON(sessionCreatedEvent); err != nil {
+			log.Println("Error sending session.created:", err)
+			return
+		}
 	}
 
 	// Message reading loop
@@ -201,6 +241,9 @@ func (u *SessionUsecase) ProcessMessage(conn Conn, state *domain.SessionState, m
 	case domain.EventResponseCancel:
 		u.handleResponseCancel(conn, state, message)
 
+	case domain.EventTranscriptionSessionUpdate:
+		u.handleTranscriptionSessionUpdate(conn, state, message)
+
 	default:
 		u.sendError(conn, baseEvent.EventID, "invalid_request_error", "unknown_event_type",
 			fmt.Sprintf("Unknown event type: %s", baseEvent.Type), nil)
@@ -249,6 +292,47 @@ func (u *SessionUsecase) handleSessionUpdate(conn Conn, state *domain.SessionSta
 	}
 
 	conn.WriteJSON(sessionUpdatedEvent)
+}
+
+// handleTranscriptionSessionUpdate handles transcription_session.update client events
+// This uses the flattened OpenAI Realtime Transcription API format
+func (u *SessionUsecase) handleTranscriptionSessionUpdate(conn Conn, state *domain.SessionState, message []byte) {
+	var event domain.TranscriptionSessionUpdateClientEvent
+	if err := json.Unmarshal(message, &event); err != nil {
+		u.sendError(conn, "", "invalid_request_error", "invalid_event", "Failed to parse transcription_session.update", nil)
+		return
+	}
+
+	if event.Session == nil {
+		u.sendError(conn, event.EventID, "invalid_request_error", "missing_field", "session field is required", "session")
+		return
+	}
+
+	// Apply the flattened config to the internal session structure
+	event.Session.ApplyToSession(state.Config)
+
+	// Check if transcription config is being updated (model/language change)
+	if event.Session.InputAudioTranscription != nil {
+		model := event.Session.InputAudioTranscription.Model
+		language := event.Session.InputAudioTranscription.Language
+		if model != "" && language != "" {
+			if err := u.reconfigureASRProvider(conn, event.EventID, model, language); err != nil {
+				// Error already sent to client
+				return
+			}
+		}
+	}
+
+	// Send transcription_session.updated event with flattened format
+	transcriptionSessionUpdatedEvent := &domain.TranscriptionSessionUpdatedEvent{
+		BaseEvent: domain.BaseEvent{
+			EventID: u.idGen.GenerateEventID(),
+			Type:    domain.EventTranscriptionSessionUpdated,
+		},
+		Session: domain.NewTranscriptionSessionConfig(state.Config),
+	}
+
+	conn.WriteJSON(transcriptionSessionUpdatedEvent)
 }
 
 // reconfigureASRProvider loads/gets the ASR provider for the requested model and language

@@ -86,11 +86,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Wrap connection with thread-safe writer
 	safeConn := NewSafeConn(conn)
 
+	// Parse intent from query parameter (OpenAI compatible: ?intent=transcription)
+	intent := usecase.IntentRealtime
+	intentParam := r.URL.Query().Get("intent")
+	if intentParam == "transcription" {
+		intent = usecase.IntentTranscription
+		log.Printf("Starting transcription session for IP: %s", clientIP)
+	}
+
 	// Handle connection in goroutine and track cleanup
 	go func() {
 		defer h.RateLimiter.RemoveConnection(clientIP)
 		defer safeConn.Close()
-		h.UseCase.HandleNewConnection(safeConn)
+		h.UseCase.HandleNewConnectionWithIntent(safeConn, intent)
 	}()
 }
 
