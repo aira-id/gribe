@@ -25,8 +25,51 @@ class GribeClient {
         this.currentTranscription = document.getElementById('current-transcription');
         this.modelSelect = document.getElementById('model-select');
         this.languageSelect = document.getElementById('language-select');
+        this.toastContainer = document.getElementById('toast-container');
 
         this.setupEventListeners();
+    }
+
+    // Toast notification system
+    showToast(message, type = 'error', title = null, duration = 5000) {
+        const icons = {
+            error: '❌',
+            warning: '⚠️',
+            success: '✅',
+            info: 'ℹ️'
+        };
+
+        const titles = {
+            error: 'Error',
+            warning: 'Warning',
+            success: 'Success',
+            info: 'Info'
+        };
+
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
+        toast.innerHTML = `
+            <span class="toast-icon">${icons[type]}</span>
+            <div class="toast-content">
+                <div class="toast-title">${title || titles[type]}</div>
+                <div class="toast-message">${message}</div>
+            </div>
+            <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
+        `;
+
+        this.toastContainer.appendChild(toast);
+
+        // Auto-remove after duration
+        if (duration > 0) {
+            setTimeout(() => {
+                if (toast.parentElement) {
+                    toast.classList.add('toast-hiding');
+                    setTimeout(() => toast.remove(), 300);
+                }
+            }, duration);
+        }
+
+        return toast;
     }
 
     setupEventListeners() {
@@ -109,6 +152,7 @@ class GribeClient {
 
             this.ws.onerror = (error) => {
                 this.log('WebSocket Error', 'error');
+                this.showToast('Failed to connect to server. Please check the URL and try again.', 'error', 'Connection Error');
                 console.error(error);
             };
 
@@ -119,6 +163,7 @@ class GribeClient {
 
         } catch (error) {
             this.log(`Connection failed: ${error.message}`, 'error');
+            this.showToast(`Connection failed: ${error.message}`, 'error', 'Connection Error');
             this.updateStatus('disconnected');
         }
     }
@@ -167,8 +212,17 @@ class GribeClient {
                 this.log(`Session created: ${event.session.id}`, 'status');
                 break;
 
+            case 'session.updated':
+                this.log('Session configuration updated', 'status');
+                this.showToast('Session configuration updated successfully', 'success', 'Session Updated', 3000);
+                break;
+
             case 'error':
-                this.log(`Server Error: ${event.error.message}`, 'error');
+                this.handleError(event.error);
+                break;
+
+            case 'conversation.item.input_audio_transcription.failed':
+                this.handleTranscriptionError(event.error);
                 break;
 
             case 'conversation.item.input_audio_transcription.delta':
@@ -189,6 +243,84 @@ class GribeClient {
                 // Reset or final touch
                 break;
         }
+    }
+
+    handleError(error) {
+        const code = error.code || 'unknown_error';
+        const message = error.message || 'An unknown error occurred';
+        const type = error.type || 'error';
+
+        // Log to console for debugging
+        console.error('Server Error:', error);
+
+        // Log to transcription log
+        this.log(`Error [${code}]: ${message}`, 'error');
+
+        // Show toast based on error type/code
+        let toastTitle = 'Error';
+        let toastType = 'error';
+
+        switch (code) {
+            case 'invalid_model':
+                toastTitle = 'Invalid Model';
+                break;
+            case 'unsupported_language':
+                toastTitle = 'Unsupported Language';
+                break;
+            case 'provider_not_configured':
+                toastTitle = 'Provider Not Configured';
+                toastType = 'warning';
+                break;
+            case 'provider_initialization_failed':
+                toastTitle = 'Provider Initialization Failed';
+                break;
+            case 'configuration_unavailable':
+                toastTitle = 'Configuration Unavailable';
+                break;
+            case 'missing_field':
+                toastTitle = 'Missing Required Field';
+                toastType = 'warning';
+                break;
+            case 'buffer_full':
+                toastTitle = 'Audio Buffer Full';
+                toastType = 'warning';
+                break;
+            default:
+                toastTitle = this.formatErrorCode(code);
+        }
+
+        this.showToast(message, toastType, toastTitle);
+    }
+
+    handleTranscriptionError(error) {
+        const code = error.code || 'transcription_failed';
+        const message = error.message || 'Transcription failed';
+
+        console.error('Transcription Error:', error);
+        this.log(`Transcription Error: ${message}`, 'error');
+
+        let toastTitle = 'Transcription Failed';
+        if (code === 'provider_not_configured') {
+            toastTitle = 'ASR Not Configured';
+            this.showToast(
+                'Please select a model and language first, then try again.',
+                'warning',
+                toastTitle
+            );
+        } else if (code === 'transcription_timeout') {
+            toastTitle = 'Transcription Timeout';
+            this.showToast(message, 'warning', toastTitle);
+        } else {
+            this.showToast(message, 'error', toastTitle);
+        }
+    }
+
+    formatErrorCode(code) {
+        // Convert snake_case to Title Case
+        return code
+            .split('_')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
     }
 
     updateCurrentTranscription(text, isDelta = false) {
@@ -262,6 +394,7 @@ class GribeClient {
 
         } catch (error) {
             this.log(`Microphone error: ${error.message}`, 'error');
+            this.showToast(`Microphone error: ${error.message}`, 'error', 'Microphone Error');
             console.error(error);
         }
     }
